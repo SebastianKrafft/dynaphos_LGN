@@ -22,10 +22,9 @@ pytestmark = pytest.mark.skipif(
             for f in ('ECC.DAT', 'INCL.DAT', 'LAYERS.DAT', 'CELLS.DAT')),
     reason=f'Real Erwin atlas not found in {ATLAS_DIR}.')
 
-# Independently found by a separate, prior investigation
-# (research/Erwin_Atlas/erwin_atlas_figure1.py) against this exact
-# Atlas_Data directory -- a regression check on the foveal-column count,
-# not just a number quoted from the paper.
+# Independently found by a separate, prior investigation against this
+# exact Atlas_Data directory -- a regression check on the foveal-column
+# count, not just a number quoted from the paper.
 EXPECTED_FOVEAL_VOXEL_COUNT = 11_055
 
 

@@ -15,7 +15,7 @@ python examples/demo_simulator_lgn.py --synthetic   # no atlas download needed
 python -m pytest dynaphos_lgn/test -q
 ```
 
-The LGN adaptation is deliberately built for modularity rather than accuracy: almost nothing about LGN stimulation has been measured, so every parameter is transplanted, borrowed across species, or fitted in-project. Every one of them lives in `config/params_lgn.yaml`, which names its source. [`docs/`](docs/README.md) explains the reasoning a reader of the code needs.
+The LGN adaptation is deliberately built for modularity rather than accuracy: almost nothing about LGN stimulation has been measured, so every parameter is transplanted, borrowed across species, or fitted in-project. Every one of them lives in `config/params_lgn.yaml`, which names its source.
 
 ## Installation
 `pip install dynaphos`

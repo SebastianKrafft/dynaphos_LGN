@@ -10,8 +10,7 @@ geometry from the atlas's local Jacobian.
 
 Gradients reach amplitude, pulse width and frequency through the image,
 the recruitment weights and the activation state -- never through voxel
-positions or layer labels, which are fixed buffers. See
-`docs/simulator.md`.
+positions or layer labels, which are fixed buffers.
 """
 from __future__ import annotations
 
@@ -239,7 +238,7 @@ class LGNPhospheneSimulator:
 
         Identical in form to Dynaphos's V1 version, leak current
         included. Rheobase and pulse-width dependence are transplanted
-        from human V1 -- see `docs/simulator.md`.
+        from human V1.
         """
         leak = self.trace.get() + require(self.params,
                                           'thresholding.rheobase')

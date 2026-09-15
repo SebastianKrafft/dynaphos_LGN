@@ -1,7 +1,6 @@
 """Electrode placement in the LGN atlas.
 
-Spreads electrodes in retinotopic rather than physical space -- see
-`docs/electrodes-and-rendering.md`.
+Spreads electrodes in retinotopic rather than physical space.
 """
 from typing import Optional, Tuple
 

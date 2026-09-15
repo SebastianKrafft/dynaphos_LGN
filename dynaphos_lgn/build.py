@@ -316,7 +316,7 @@ def jacobian_report(jacobian_atlas, atlas, params: Mapping) -> str:
     Reports fit coverage, fit quality, the two confidence flags, and the
     magnification/anisotropy field binned by eccentricity. Read the
     anisotropy column against the Connolly & Van Essen checkpoint -- a
-    checkpoint, not a target; see `docs/magnification.md`.
+    checkpoint, not a target.
 
     `validation.jacobian_report_sample_size` fixes how many voxels are
     drawn for the magnification statistics. Counts, flag rates and

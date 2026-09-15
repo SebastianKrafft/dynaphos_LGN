@@ -1,23 +1,18 @@
 """Receptive-field size models, and the cross-species caveats they carry."""
-from pathlib import Path
-
 import numpy as np
 import pytest
 
 from dynaphos_lgn import receptive_fields as rf
 
-CRONER_CSV = (Path(__file__).resolve().parents[1] / 'research'
-              / 'croner_kaplan_fig4_extracted.csv')
-
 
 class TestClassOrdering:
     @pytest.mark.parametrize('ecc', [5.0, 10.0, 20.0, 30.0])
     def test_konio_larger_than_magno_larger_than_parvo(self, lgn_params, ecc):
-        """The one robust, cross-species-replicated finding: K > M > P
-        in centre size at matched eccentricity. Note the magnitudes mix
-        a real class difference with a species difference, since the K
-        numbers are owl monkey and M/P are macaque."""
-        sizes = rf.class_ordering_check(lgn_params, ecc)
+        """K > M > P in centre size at matched eccentricity. The
+        magnitudes mix a class difference with a species one."""
+        sizes = {c: float(np.atleast_1d(
+            rf.center_radius_deg(ecc, lgn_params, c))[0])
+            for c in ('konio', 'magno', 'parvo')}
         assert sizes['konio'] > sizes['magno'] > sizes['parvo']
 
     @pytest.mark.parametrize('ecc', [0.0, 5.0, 20.0, 35.0])
@@ -111,35 +106,3 @@ class TestDifferenceOfGaussians:
         xu = lgn_params['receptive_fields']['xu_konio']
         expected = xu['rs_slope_per_deg'] * e + xu['rs_intercept_deg']
         assert float(k.surround_radius_deg) == pytest.approx(expected)
-
-
-@pytest.mark.skipif(not CRONER_CSV.exists(),
-                    reason='digitised Croner & Kaplan points not present')
-class TestRefit:
-    def test_refit_reproduces_the_configured_coefficients(self, lgn_params):
-        """The coefficients in the config are a fit, not a citation, so
-        the fit has to stay reproducible from the data it came from."""
-        fitted = rf.fit_croner_kaplan(CRONER_CSV)
-        stored_all = lgn_params['receptive_fields']['croner_kaplan'][
-            'exponential']
-        for cls, stored in stored_all.items():
-            assert fitted[cls]['a_deg'] == pytest.approx(stored['a_deg'],
-                                                         rel=1e-4)
-            assert fitted[cls]['b_per_deg'] == pytest.approx(
-                stored['b_per_deg'], rel=1e-4)
-            assert fitted[cls]['n'] == stored['n']
-
-    def test_high_confidence_only_shrinks_the_parvo_sample(self, lgn_params):
-        """Excluding the cluster-split points is a real bias/variance
-        trade-off, not a free improvement -- 80 P points become 16."""
-        strict = rf.fit_croner_kaplan(CRONER_CSV, confidence='high')
-        assert strict['parvo']['n'] < lgn_params['receptive_fields'][
-            'croner_kaplan']['exponential']['parvo']['n']
-
-    def test_power_form_refits_to_the_stored_power_coefficients(self, lgn_params):
-        fitted = rf.fit_croner_kaplan(CRONER_CSV, form='power')
-        stored_all = lgn_params['receptive_fields']['croner_kaplan']['power']
-        for cls, stored in stored_all.items():
-            assert fitted[cls]['a_deg'] == pytest.approx(stored['a_deg'],
-                                                         rel=1e-4)
-            assert fitted[cls]['b'] == pytest.approx(stored['b'], rel=1e-4)

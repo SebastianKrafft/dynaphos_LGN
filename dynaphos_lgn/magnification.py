@@ -20,9 +20,8 @@ a phosphene size.
     formula does not supply, so it returns an interval.
 
 None of the three is an independent measurement of the others -- they
-all trace back to one macaque's 415 recording sites, so the comparison
-utilities below are validation checkpoints, not cross-checks. See
-`docs/magnification.md`.
+all trace back to one macaque's 415 recording sites, so agreement
+between them is not a cross-check.
 """
 from __future__ import annotations
 
@@ -133,8 +132,7 @@ class LocalMagnification:
     def anisotropy(self) -> np.ndarray:
         """Ratio of the two principal magnifications, >= 1.
 
-        A validation target only -- never a simulator input. See
-        `docs/magnification.md` for the Connolly & Van Essen checkpoint.
+        A validation target only -- never a simulator input.
         """
         with np.errstate(divide='ignore', invalid='ignore'):
             return np.where(self.minor_deg_per_mm > 0,
@@ -181,7 +179,7 @@ class JacobianMagnification(MagnificationModel):
     principal magnifications; the leading left singular vector gives the
     major axis's direction in the visual field. LGN layers are thin
     curved sheets, so the third physical direction carries no
-    retinotopic gradient -- see `docs/magnification.md`.
+    retinotopic gradient.
     """
 
     def __init__(self, jacobian_atlas, params: Mapping, erwin_atlas=None):
@@ -375,9 +373,7 @@ class MalpeliDensityMagnification(MagnificationModel):
     T is unresolved by roughly an order of magnitude between two checks
     -- treat this model as the MAGNITUDE estimate and the
     Jacobian/atlas-gradient route as the SHAPE estimate, and do not
-    report either as agreeing with the other. `consistency_report`
-    prints the comparison without picking a winner. Full discussion in
-    `docs/magnification.md`.
+    report either as agreeing with the other.
     """
 
     def __init__(self, params: Mapping, cell_class: str = 'parvo',
@@ -398,15 +394,13 @@ class MalpeliDensityMagnification(MagnificationModel):
                 f"build this model with `from_atlas`, or set the value in "
                 f"the config.")
         if callable(cells_per_mm3):
-            # An eccentricity-resolved profile. Measured 12 Sep 2026:
-            # packing density is NOT uniform across the nucleus -- it
-            # falls monotonically with eccentricity, by 1.5x (parvo) and
-            # 2.6x (magno) between the centre and the far periphery
-            # (`research/cell-density-profile-2026-09-12.md`). A single
-            # scalar is therefore wrong by up to 2x for magno in the
-            # central field, and volume magnification is rho_v's direct
-            # reciprocal. Still a scalar by default; this only makes the
-            # better thing expressible.
+            # An eccentricity-resolved profile. Packing density is NOT
+            # uniform across the nucleus: it falls monotonically with
+            # eccentricity, by 1.5x (parvo) and 2.6x (magno) from centre
+            # to far periphery, and volume magnification is rho_v's
+            # direct reciprocal, so a single scalar is wrong by up to 2x
+            # for magno in the central field. Still a scalar by default;
+            # this only makes the better thing expressible.
             self.cells_per_mm3_profile = cells_per_mm3
             self.cells_per_mm3 = float(np.mean(
                 np.atleast_1d(cells_per_mm3(np.array([1.0, 10.0, 40.0])))))
@@ -433,13 +427,11 @@ class MalpeliDensityMagnification(MagnificationModel):
         - one ascending triple, shared by both classes (the original);
         - a mapping with a `parvo` and a `magno` triple.
 
-        Atlas measurement (`check_column_thickness.py`, 12 Sep 2026) puts
-        summed parvo T at 0.56-1.77 mm and summed magno T at 0.20-0.74 mm
-        -- a factor of ~2.4 apart, so a single shared triple is
-        necessarily wrong for one of the two classes whatever it is set
-        to. This accessor exists so adopting a split value is a config
-        edit rather than a code change; it does not itself change any
-        default.
+        Measured from the atlas, summed parvo T is 0.56-1.77 mm and
+        summed magno T 0.20-0.74 mm -- ~2.4x apart, so one shared triple
+        is necessarily wrong for one of the two classes. This accessor
+        makes adopting a split value a config edit rather than a code
+        change; it changes no default.
         """
         configured = require(
             params, 'magnification.density_derived.column_thickness_mm')
@@ -505,61 +497,6 @@ class MalpeliDensityMagnification(MagnificationModel):
                 implied, bracket)
         return implied
 
-    def consistency_report(self, reference: 'MagnificationModel' = None,
-                           eccentricities_deg: np.ndarray = None) -> str:
-        """Compare this model against an anatomical anchor and, optionally,
-        another magnification model."""
-        if self.cells_per_mm3_profile is None:
-            rho_line = f"  rho_v (cells/mm^3)          : " \
-                       f"{self.cells_per_mm3:.4g}"
-        else:
-            sampled = self.cells_per_mm3_at(np.array([1.0, 5.0, 20.0, 60.0]))
-            rho_line = ("  rho_v (cells/mm^3)          : profile, "
-                        + " ".join(f"{e:g}deg={v:.4g}" for e, v
-                                   in zip((1, 5, 20, 60), sampled)))
-        lines = [f"MalpeliDensityMagnification ({self.cell_class}) "
-                 f"consistency report",
-                 rho_line,
-                 f"  column thickness (lo/mid/hi): "
-                 f"{self.column_thickness_mm}"]
-        vol_1deg = float(self.volume_magnification_mm3_per_deg2(1.0))
-        for t in self.column_thickness_mm:
-            lines.append(f"    T = {t:>5.2f} mm -> map length "
-                         f"{self.map_length_mm(t):6.2f} mm, "
-                         f"M(1 deg) = {np.sqrt(vol_1deg / t):.3f} mm/deg")
-        lo, mid, hi = self.map_length_anchor_mm
-        lines.append(f"  implied T for a {lo}-{hi} mm map length: "
-                     f"{self.calibrate_column_thickness_mm(hi):.2f} - "
-                     f"{self.calibrate_column_thickness_mm(lo):.2f} mm "
-                     f"(central anchor {mid} mm -> "
-                     f"{self.calibrate_column_thickness_mm(mid):.2f} mm)")
-        if reference is not None:
-            e = (np.asarray(eccentricities_deg, float)
-                 if eccentricities_deg is not None
-                 else np.array([1., 3., 5., 10., 20.]))
-            # `cell_class=self.cell_class` is load-bearing, not
-            # cosmetic: every `at_eccentricity` defaults to 'parvo', and
-            # `JacobianMagnification` actually honours the argument (it
-            # selects a different set of atlas layers per class). Without
-            # it a magno model silently compared itself against the
-            # parvo reference table. Fixed 12 Sep 2026; regression test
-            # in `test_magnification.py::
-            # test_consistency_report_uses_own_cell_class`.
-            ref = reference.at_eccentricity(
-                e, cell_class=self.cell_class).linear_mm_per_deg
-            _, own, _ = self.interval(e)
-            lines.append(f"  vs reference model (mm/deg), compared\n"
-                         f"  as {self.cell_class!r} on both sides:")
-            lines.append("    ecc   this   reference   ratio")
-            for ei, oi, ri in zip(e, own, ref):
-                lines.append(f"    {ei:5.1f} {oi:6.3f} {ri:11.3f} "
-                             f"{oi / ri:7.2f}")
-            lines.append("  NOTE: not independent sources -- the atlas "
-                         "was reconstructed from Malpeli's own data. A "
-                         "ratio far from 1 indicates a processing or "
-                         "unit-convention problem, not biology.")
-        return '\n'.join(lines)
-
     @classmethod
     def from_atlas(cls, erwin_atlas, params: Mapping,
                    cell_class: str = 'parvo',
@@ -576,9 +513,7 @@ class MalpeliDensityMagnification(MagnificationModel):
             uniform -- it falls by 1.5x (parvo) to 2.6x (magno) from the
             centre to the far periphery, so the global mean is wrong by
             up to 2x for magno inside 2 deg. Defaults to False, which
-            keeps the historical behaviour; see
-            `research/cell-density-profile-2026-09-12.md` before
-            deciding which you want.
+            keeps the historical behaviour.
         """
         mask = (erwin_atlas.valid
                 & np.isin(erwin_atlas.layer,
@@ -685,49 +620,3 @@ class MalpeliDensityMagnification(MagnificationModel):
                              "eccentricities.")
         idx = tuple(np.asarray(voxel_indices, dtype=int).T)
         return self.at_eccentricity(erwin_atlas.eccentricity_deg[idx])
-
-
-# ----------------------------------------------------------------------
-# Validation checkpoints (preprocessing only -- never in the forward pass)
-# ----------------------------------------------------------------------
-
-def vurro_phosphene_sigma_deg(eccentricity_deg: ArrayLike,
-                              params: Mapping) -> np.ndarray:
-    """sigma = slope * rho + intercept -- Vurro, Crowell & Pezaris (2014).
-
-    A human-acuity-derived curve: an order-of-magnitude cross-reference
-    for rendered sizes, never an input. See `docs/magnification.md`.
-    """
-    c = require(params,
-                'magnification.checkpoints.vurro_phosphene_sigma')
-    return (c['slope_per_deg'] * np.asarray(eccentricity_deg, dtype=float)
-            + c['intercept_deg'])
-
-
-def compare_against_malpeli(jacobian_magnification: JacobianMagnification,
-                            eccentricities_deg: np.ndarray,
-                            cell_class: str = 'parvo') -> dict:
-    """One-time QA of the cached Jacobian field against Malpeli's curve.
-
-    Deliberately returns no pass/fail: the two are not independent
-    measurements, so agreement is partly by construction and
-    disagreement says something about processing, not biology.
-
-    :return: dict of parallel arrays, for tabulating or plotting.
-    """
-    params = jacobian_magnification.params
-    e = np.atleast_1d(np.asarray(eccentricities_deg, dtype=float))
-    local = jacobian_magnification.at_eccentricity(e, cell_class)
-    return {
-        'eccentricity_deg': e,
-        'jacobian_major_deg_per_mm': local.major_deg_per_mm,
-        'jacobian_minor_deg_per_mm': local.minor_deg_per_mm,
-        'jacobian_anisotropy': local.anisotropy,
-        'jacobian_areal_deg2_per_mm2': local.areal_deg2_per_mm2,
-        'jacobian_linear_mm_per_deg': local.linear_mm_per_deg,
-        'malpeli_density_cells_per_deg2': malpeli_density(e, params,
-                                                          cell_class),
-        'vurro_sigma_deg': vurro_phosphene_sigma_deg(e, params),
-        'isotropic_by_construction': local.isotropic_by_construction,
-    }
-

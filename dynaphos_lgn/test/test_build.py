@@ -1,74 +1,10 @@
-"""Calibration diagnostics and the one-call build path."""
+"""The one-call build path."""
 import numpy as np
 import pytest
 import torch
 
-from dynaphos_lgn import calibration
 from dynaphos_lgn.build import (build_atlas, build_kernel,
                                 build_magnification_model, build_simulator)
-from dynaphos_lgn.current_spread import excitability_constant_ua_per_mm2
-
-
-class TestCalibration:
-    def test_comparison_covers_every_electrode(self, built):
-        _, array = built
-        c = calibration.size_comparison(array, 80.0)
-        assert len(c['ratio']) == array.n_electrodes
-        assert np.all(c['vurro_sigma_deg'] > 0)
-
-    def test_equivalent_sigma_sits_between_the_two_axes(self, built):
-        _, array = built
-        c = calibration.size_comparison(array, 80.0)
-        ok = np.isfinite(c['sigma_major_deg']) & np.isfinite(
-            c['sigma_minor_deg'])
-        assert np.all(c['sigma_equivalent_deg'][ok]
-                      <= c['sigma_major_deg'][ok] + 1e-9)
-        assert np.all(c['sigma_equivalent_deg'][ok]
-                      >= c['sigma_minor_deg'][ok] - 1e-9)
-
-    def test_implied_k_inverts_the_size_relation(self, built):
-        """sigma scales as 1/sqrt(K), so substituting the implied K must
-        reproduce the reference size. This is the check that the
-        diagnostic is arithmetically self-consistent, whatever one
-        thinks of the reference curve."""
-        _, array = built
-        r = calibration.implied_k(array, 80.0)
-        finite = np.isfinite(r['k_implied_per_electrode'])
-        predicted = (r['sigma_equivalent_deg'][finite]
-                     * np.sqrt(r['k_current_ua_per_mm2']
-                               / r['k_implied_per_electrode'][finite]))
-        assert np.allclose(predicted, r['vurro_sigma_deg'][finite],
-                           rtol=1e-6)
-
-    def test_reports_a_range_because_the_shapes_disagree(self, built):
-        """No single K reconciles a magnification-driven size law with a
-        linear acuity proxy, and the spread is the point rather than
-        noise to be averaged away."""
-        _, array = built
-        r = calibration.implied_k(array, 80.0)
-        lo, hi = r['k_implied_range']
-        assert hi > lo
-
-    def test_report_leads_with_the_caveat(self, built):
-        _, array = built
-        text = calibration.report(array, 80.0)
-        assert 'DIAGNOSTIC' in text
-        assert 'unvalidated for LGN' in text
-
-    def test_what_if_kernel_uses_the_implied_value(self, built, lgn_params):
-        _, array = built
-        kernel = calibration.kernel_with_implied_k(array, 80.0)
-        assert kernel.k != excitability_constant_ua_per_mm2(lgn_params)
-        assert kernel.shape == array.kernel.shape
-
-    def test_larger_k_shrinks_the_rendered_size(self, built):
-        _, array = built
-        base = array.kernel.sigma_mm(80.0)
-        tighter = calibration.kernel_with_implied_k(array, 80.0)
-        if tighter.k > array.kernel.k:
-            assert tighter.sigma_mm(80.0) < base
-        else:
-            assert tighter.sigma_mm(80.0) > base
 
 
 class TestBuild:

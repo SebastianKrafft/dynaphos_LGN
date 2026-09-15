@@ -9,7 +9,6 @@ optimised current, which is what makes per-layer recruitment
 differentiable at all.
 
 Electrode positions are assumed fixed (implant time, not optimised).
-See `docs/electrodes-and-rendering.md`.
 """
 from __future__ import annotations
 
@@ -172,8 +171,7 @@ class LGNElectrodeArray:
 
         Spreads in retinotopic rather than physical space, and the
         shipped `electrodes.depth_selection` is ``random`` so electrodes
-        do not all land in one lamina -- see
-        `docs/electrodes-and-rendering.md`.
+        do not all land in one lamina.
         """
         from dynaphos_lgn.lgn_utils import get_electrode_layout
         rng = np.random.default_rng() if rng is None else rng
@@ -448,9 +446,7 @@ class LGNElectrodeArray:
 
         Sized from the point cloud's own spacing, never from a
         magnification factor, so no per-voxel-Jacobian assumption sneaks
-        back in through the renderer. See
-        `docs/electrodes-and-rendering.md` for the two corrections
-        applied to that spacing.
+        back in through the renderer.
         """
         pts = self.candidate_vf_xy[:, self.scatter_index, :]
         valid = self.candidate_valid[:, self.scatter_index]

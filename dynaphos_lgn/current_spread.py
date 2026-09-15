@@ -6,8 +6,7 @@ the two can never drift apart. The kernel is smooth by necessity: a hard
 in/out cutoff has zero gradient with respect to current, which would
 break end-to-end optimisation at the first step.
 
-``K`` is transplanted from macaque V1 and is unvalidated for LGN. See
-`docs/current-spread.md` for that and the rest of the background.
+``K`` is transplanted from macaque V1 and is unvalidated for LGN.
 """
 from __future__ import annotations
 
@@ -72,7 +71,7 @@ def k_for_cell_class(cell_class: str, params: Mapping) -> float:
     `current_spread.class_scaling` picks between 'none' (the default),
     'diameter' (K ~ 1/d) and 'diameter_squared' (K ~ 1/d^2). No
     measurement supports any particular exponent, which is why all three
-    stay explicit -- see `docs/current-spread.md`.
+    stay explicit.
     """
     k_reference = excitability_constant_ua_per_mm2(params)
     reference_class = require(params,
@@ -228,8 +227,7 @@ def aggregate_activation(per_electrode_weights: torch.Tensor,
 
     There is no LGN multi-electrode data: the modes bracket a real
     disagreement in the non-LGN literature rather than approximating one
-    known answer, so report across modes, not from one. See
-    `docs/current-spread.md`.
+    known answer, so report across modes, not from one.
     """
     if mode in ('independent', 'field_superposition'):
         return per_electrode_weights.sum(dim=-2)
@@ -246,7 +244,7 @@ def threshold_reduction_bracket(n_electrodes: int, spacing_mm: float,
     The two mechanistic extremes from the non-LGN literature, plus the
     geometric quantity that decides which should dominate: electrode
     spacing relative to the current-spread radius. This is a bracket,
-    not a prediction -- see `docs/current-spread.md`.
+    not a prediction.
 
     :return: dict with ``spread_radius_mm``, ``spacing_over_radius``,
         ``floor_fraction`` (Callier-style probability summation),
@@ -292,6 +290,5 @@ def threshold_reduction_bracket(n_electrodes: int, spacing_mm: float,
         'regime': regime,
         'note': ('Bracket, not a prediction: no LGN multi-electrode '
                  'threshold data exists. Floor from Callier et al. (2015), '
-                 'ceiling from Kunigk et al. (2022), both non-LGN. See '
-                 'docs/current-spread.md.'),
+                 'ceiling from Kunigk et al. (2022), both non-LGN.'),
     }

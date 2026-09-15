@@ -297,14 +297,12 @@ magnification:
     # May be either one shared triple (as here) or a mapping with a
     # `parvo` and a `magno` triple.
     #
-    # MEASURED 12 Sep 2026, and this value does not match it. The atlas
-    # measures its own T -- volume-per-solid-angle divided by the
-    # Jacobian's areal magnification -- and the answer is summed parvo
-    # 0.56-1.77 mm, summed magno 0.20-0.74 mm
-    # (`research/column-thickness-measured-2026-09-12.md`). So the
-    # central 3.0 mm below is roughly 2x too thick for parvo and 5-7x
-    # for magno, and no single shared triple can be right for both:
-    # the classes differ by a factor of ~2.4.
+    # MEASURED, and this value does not match it. The atlas measures
+    # its own T -- volume-per-solid-angle divided by the Jacobian's
+    # areal magnification -- giving summed parvo 0.56-1.77 mm and
+    # summed magno 0.20-0.74 mm. So the central 3.0 mm below is roughly
+    # 2x too thick for parvo and 5-7x for magno, and no single shared
+    # triple can be right for both: the classes differ by ~2.4x.
     #
     # The split value the measurement supports, each interval widened to
     # bracket Connolly & Van Essen (1984)'s summed laminar thicknesses
@@ -333,17 +331,11 @@ magnification:
   # Validation checkpoints. Used once, in preprocessing, never in the
   # forward pass.
   checkpoints:
-    # Connolly & Van Essen: 2-3x isoeccentricity/isopolar ratio near the
-    # horizontal meridian (parvocellular layer 6), reversed near the
-    # vertical meridian (magnocellular layer 1). QUALITATIVE -- a
-    # checkpoint, never a target, and never converted to absolute
-    # degrees at plausible electrode eccentricities.
+    # Connolly & Van Essen (1984). QUALITATIVE -- a checkpoint, never
+    # a target.
     anisotropy_ratio: [2.0, 3.0]
-    # Vurro, Crowell & Pezaris (2014): sigma = slope * rho + intercept.
-    # HUMAN acuity used as a magnification proxy, cross-checked by its
-    # authors against a single unpublished LGN monkey point. Models no
-    # electrode, no current and no current spread. Order-of-magnitude
-    # cross-reference only.
+    # Vurro, Crowell & Pezaris (2014). HUMAN acuity as a magnification
+    # proxy: order-of-magnitude cross-reference only.
     vurro_phosphene_sigma:
       slope_per_deg: 0.043
       intercept_deg: 0.083
@@ -355,11 +347,10 @@ receptive_fields:
   cell_classes: [magno, parvo, konio]
 
   # NO published closed-form macaque rc(E) exists. These are in-project
-  # least-squares fits to the digitised Croner & Kaplan (1995) Fig. 4
-  # points in research/croner_kaplan_fig4_extracted.csv, refittable via
-  # `receptive_fields.fit_croner_kaplan`. The M/P ratio they imply runs
-  # 2.97x at the fovea down to 1.68x at 35 deg, so Croner & Kaplan's
-  # "about 2x" is a mid-range summary, not a constant.
+  # least-squares fits to digitised Croner & Kaplan (1995) Fig. 4
+  # points. The M/P ratio they imply runs 2.97x at the fovea down to
+  # 1.68x at 35 deg, so "about 2x" is a mid-range summary, not a
+  # constant.
   croner_kaplan:
     exponential:                # rc = a * exp(b * E)
       magno: {a_deg: 0.096236, b_per_deg: 0.032755, r2_log: 0.619, n: 18,
@@ -453,10 +444,10 @@ thresholding:
   # experiment measures anyway -- at the cost of changing the model, not
   # just the optimiser.
   #
-  # ON by default since 12 Sep 2026 (signed off 11 Sep): this simulator
-  # exists to be optimised end-to-end, and the hard gate makes that
-  # impossible for exactly the electrodes an optimiser most needs to
-  # move. Still a model change, so say so when reporting.
+  # ON by default: this simulator exists to be optimised end-to-end,
+  # and the hard gate makes that impossible for exactly the electrodes
+  # an optimiser most needs to move. Still a model change, so say so
+  # when reporting.
   soft_threshold: True
   soft_threshold_slope: null    # null -> 1 / activation_threshold_sd
 
@@ -469,14 +460,11 @@ thresholding:
   # by the brightness curve's own 0.117 floor at zero activation, a
   # 64-electrode array on the real atlas renders a *zero-amplitude*
   # frame with a peak pixel of 0.041 and 2.0% of pixels above 0.01 --
-  # measured, not estimated, and reproducible with
-  # `python -m dynaphos_lgn.check_soft_threshold`
-  # (research/soft-threshold-baseline-*.md). Under the hard gate, and
-  # under the baselined soft gate, that frame is exactly black.
+  # measured, not estimated. Under the hard gate, and under the
+  # baselined soft gate, that frame is exactly black.
   #
   #   none            Plain logistic. Reproduces the behaviour of the
-  #                   soft threshold as first implemented. Choose this
-  #                   only to reproduce a pre-12-Sep-2026 result.
+  #                   soft threshold as first implemented.
   #   zero_activation (default) Subtract the zero-activation value and
   #                   renormalise:
   #                       p(a) = (S(a) - S(0)) / (1 - S(0))
@@ -498,27 +486,23 @@ default_stim:
   relative_stim_duration: 1
   pw_default: 170.e-6           # seconds
   freq_default: 300             # Hertz
-  # Chronaxie is NOT a single number for LGN. General-CNS axonal range
-  # 30-200 us; macaque V1 ICMS detection 0.19 ms mean (Tehovnik & Slocum
-  # 2009); somatic 1-10 ms. Short pulses bias towards axonal activation,
-  # including axons of passage. A range on purpose.
+  # Chronaxie is NOT a single number for LGN (Tehovnik & Slocum 2009).
+  # Short pulses bias towards axonal activation, including axons of
+  # passage. A range on purpose.
   chronaxie_range_s: [30.e-6, 200.e-6]
 
 # ----------------------------------------------------------------------
-# Benchmarks: measured LGN values, used for calibration and reporting
+# Benchmarks: measured LGN values
 # ----------------------------------------------------------------------
-# Pezaris & Reid (2007) is the single load-bearing macaque LGN
-# microstimulation paper. Note the 40 uA titration sub-study (n=6) and
-# the main-task scatter figures (n=14) are NON-OVERLAPPING experiments.
+# Pezaris & Reid (2007), macaque LGN microstimulation. The n=6
+# titration and the n=14 main-task figures are NON-OVERLAPPING.
 benchmarks:
   pezaris_2007:
     threshold_ua: [40.0, 12.0]          # mean, sd (n=6)
     accuracy_deg: [2.3, 1.2]
     repeatability_deg: [0.8, 0.6]
-  # Two mechanistically different predictions, not one number. Callier
-  # et al. (2015) macaque S1: <10% at N=4, spacing-independent. Kunigk
-  # et al. (2022) rat S1: up to ~66-76%, vanishing beyond ~600 um.
-  # Fernandez et al. (2021) human V1: 28% at N=4, ~400 um pitch.
+  # Two mechanistically different predictions, not one number.
+  # Floor: Callier et al. (2015). Ceiling: Kunigk et al. (2022).
   multi_electrode:
     probability_summation_max_reduction: 0.10
     field_summation_max_reduction: 0.66

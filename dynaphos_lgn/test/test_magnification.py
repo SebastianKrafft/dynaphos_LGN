@@ -175,10 +175,10 @@ class TestMalpeliDensityMagnification:
 
     def test_column_thickness_may_be_split_by_class(self,
                                                     params_override):
-        """The measured T is ~2.4x larger for parvo than for magno
-        (`check_column_thickness.py`, 12 Sep 2026), so a single shared
-        triple is necessarily wrong for one class. Both config shapes
-        have to work: the original shared triple, and a per-class split.
+        """The measured T is ~2.4x larger for parvo than for magno, so
+        a single shared triple is necessarily wrong for one class. Both
+        config shapes have to work: the original shared triple, and a
+        per-class split.
         """
         params = params_override(
             magnification__density_derived__column_thickness_mm={
@@ -245,52 +245,6 @@ class TestMalpeliDensityMagnification:
             central_flat[0] / np.sqrt(2.0), rel=1e-9)
         assert outer[0] == pytest.approx(outer_flat[0], rel=1e-9)
 
-    def test_consistency_report_survives_a_profile(self, lgn_params):
-        """It formats rho_v with `:.4g`, which raises on a callable."""
-        def profile(ecc):
-            return 20000.0 + 0.0 * np.asarray(ecc, float)
-
-        report = mg.MalpeliDensityMagnification(
-            lgn_params, 'parvo', cells_per_mm3=profile).consistency_report()
-        assert 'profile' in report
-
-    def test_consistency_report_uses_own_cell_class(self, lgn_params):
-        """Regression: `consistency_report(reference=...)` used to call
-        `reference.at_eccentricity(e)` with no `cell_class`, so a magno
-        model silently compared itself against the reference's parvo
-        default. Found 11 Sep 2026 while writing
-        `check_magnification_agreement.py`, fixed 12 Sep 2026.
-
-        Checked with a recording stub rather than a real Jacobian: the
-        bug is entirely about which argument gets passed, and a stub
-        makes the failure unambiguous instead of hiding it inside a
-        numeric near-miss.
-        """
-        seen = []
-
-        class RecordingReference(mg.MagnificationModel):
-            def at_eccentricity(self, eccentricity_deg,
-                                cell_class='parvo'):
-                seen.append(cell_class)
-                e = np.atleast_1d(np.asarray(eccentricity_deg, float))
-                ones = np.ones_like(e)
-                return mg.LocalMagnification(
-                    major_deg_per_mm=ones, minor_deg_per_mm=ones,
-                    orientation_rad=np.zeros_like(e),
-                    isotropic_by_construction=np.ones_like(e, bool),
-                    unreliable_beyond_neighborhood=np.zeros_like(e, bool),
-                    valid=np.ones_like(e, bool))
-
-        for cell_class in ('parvo', 'magno'):
-            model = mg.MalpeliDensityMagnification(
-                lgn_params, cell_class, cells_per_mm3=0.36 / 0.025 ** 3)
-            model.consistency_report(reference=RecordingReference(),
-                                     eccentricities_deg=np.array([5.0]))
-
-        assert seen == ['parvo', 'magno'], (
-            f"consistency_report passed {seen} to the reference model; "
-            f"it must pass its own cell_class on both sides.")
-
 
 def test_from_atlas_can_build_an_eccentricity_resolved_rho_v(
         synthetic_atlas, lgn_params):
@@ -334,13 +288,6 @@ class TestAtlasGradient:
         local = scalar.at_eccentricity(np.array([5.0, 15.0]))
         assert np.allclose(local.anisotropy, 1.0)
         assert np.all(local.isotropic_by_construction)
-
-
-def test_vurro_crosscheck_is_in_a_plausible_range(lgn_params):
-    """sigma = 0.043*rho + 0.083 deg, cross-checked by its own authors
-    against ~0.5 deg at 10 deg eccentricity."""
-    assert float(mg.vurro_phosphene_sigma_deg(10.0, lgn_params)) == \
-        pytest.approx(0.513, abs=1e-3)
 
 
 @requires_real_atlas
@@ -442,6 +389,5 @@ class TestRealAtlasCellDistribution:
         assert ratios[0] < 0.85, (
             f"central 1-2 deg parvo ratio is {ratios[0]:.3f}; the "
             f"documented shortfall is ~0.74. If this now passes, the "
-            f"atlas or the loader changed and "
-            f"`research/cell-density-profile-2026-09-12.md` is stale.")
+            f"atlas or the loader changed.")
         assert ratios.max() > 1.10

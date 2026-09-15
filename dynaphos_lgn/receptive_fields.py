@@ -8,13 +8,12 @@ phosphene appearance.
 Verification is unusually uneven here: the M/P coefficients are an
 in-project fit to digitised Croner & Kaplan (1995) points, and the
 koniocellular defaults are owl monkey, good for the K > M > P ordering
-and not for absolute sizes. See `docs/receptive-fields.md`.
+and not for absolute sizes.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, Mapping, Optional, Sequence, Union
+from typing import Mapping, Sequence, Union
 
 import numpy as np
 
@@ -131,7 +130,7 @@ def surround_radius_deg(eccentricity_deg: ArrayLike, params: Mapping,
     ``receptive_fields.croner_kaplan.surround_center_radius_ratio``.
     Applying it as a scalar multiplier forces rs to share rc's
     eccentricity dependence, which the data does not establish -- a
-    flagged assumption, see `docs/receptive-fields.md`. The koniocellular
+    flagged assumption. The koniocellular
     class ignores it and uses Xu et al.'s own rs(E).
     """
     if cell_class == 'konio':
@@ -159,71 +158,3 @@ def receptive_field(eccentricity_deg: ArrayLike, params: Mapping,
             params,
             f'receptive_fields.surround_center_volume_ratio.{cell_class}'),
         cell_class=cell_class)
-
-
-def class_ordering_check(params: Mapping,
-                         eccentricity_deg: float = 10.0) -> Dict[str, float]:
-    """Centre radii of all three classes at one eccentricity.
-
-    The robust finding is the ORDERING K > M > P. The size of any gap
-    mixes a class difference with a species one, since K is owl monkey
-    and M/P are macaque.
-    """
-    return {c: float(np.atleast_1d(
-        center_radius_deg(eccentricity_deg, params, c))[0])
-        for c in cell_classes(params)}
-
-
-def fit_croner_kaplan(csv_path: Union[str, Path],
-                      form: str = 'exponential',
-                      confidence: Optional[str] = None) -> Dict[str, dict]:
-    """Refit rc(E) from the digitised Croner & Kaplan points.
-
-    Regenerates the configured coefficients, so the fit can be re-run
-    when the digitisation improves instead of staying frozen.
-
-    :param csv_path: `croner_kaplan_fig4_extracted.csv`.
-    :param form: 'exponential' (rc = a*exp(b*E), the default) or 'power'
-        (rc = a*E^b).
-    :param confidence: If given (e.g. 'high'), keep only rows with that
-        label. Filtering to 'high' shrinks the P sample from 80 to 16,
-        so it is a bias/variance trade-off, not a free improvement.
-        Defaults to None (keep every row).
-    :return: ``{cell_class: {a_deg, b..., r2_log, n, ecc_range_deg}}``
-    """
-    import csv as _csv
-
-    rows = {'M': [], 'P': []}
-    with open(csv_path, newline='') as f:
-        for row in _csv.DictReader(f):
-            if confidence is not None and row['confidence'] != confidence:
-                continue
-            key = row['cell_type'].strip().upper()
-            if key in rows:
-                rows[key].append((float(row['eccentricity_deg']),
-                                  float(row['center_radius_deg'])))
-
-    out = {}
-    for key, cls in (('M', 'magno'), ('P', 'parvo')):
-        data = np.asarray(rows[key], dtype=float)
-        if data.size == 0:
-            continue
-        e, rc = data[:, 0], data[:, 1]
-        keep = rc > 0
-        if form == 'power':
-            keep &= e > 0
-            x = np.log(e[keep])
-        else:
-            x = e[keep]
-        y = np.log(rc[keep])
-        slope, intercept = np.polyfit(x, y, 1)
-        residual = y - (intercept + slope * x)
-        r2 = 1.0 - float(np.sum(residual ** 2)
-                         / np.sum((y - y.mean()) ** 2))
-        entry = {'a_deg': float(np.exp(intercept)), 'r2_log': r2,
-                 'n': int(keep.sum()),
-                 'ecc_range_deg': (float(e[keep].min()),
-                                   float(e[keep].max()))}
-        entry['b' if form == 'power' else 'b_per_deg'] = float(slope)
-        out[cls] = entry
-    return out

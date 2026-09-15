@@ -37,12 +37,9 @@ from matplotlib import pyplot as plt
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dynaphos.utils import load_params                              # noqa: E402
-from dynaphos_lgn import calibration                                # noqa: E402
 from dynaphos_lgn.build import build_simulator                      # noqa: E402
 from dynaphos_lgn.current_spread import threshold_reduction_bracket # noqa: E402
 from dynaphos_lgn.params import require                             # noqa: E402
-from dynaphos_lgn.magnification import (MalpeliDensityMagnification,  # noqa: E402
-                                        vurro_phosphene_sigma_deg)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -77,10 +74,6 @@ def plot_electrodes(sim, out_path: Path):
     major, minor = array.phosphene_sigma_deg(array.max_current_ua)
     ax2.scatter(array.eccentricity_deg, major, label='major axis', s=30)
     ax2.scatter(array.eccentricity_deg, minor, label='minor axis', s=30)
-    e = np.linspace(max(float(np.nanmin(array.eccentricity_deg)), 0.1),
-                    float(np.nanmax(array.eccentricity_deg)) + 1, 100)
-    ax2.plot(e, vurro_phosphene_sigma_deg(e, sim.params), 'k--', lw=1,
-             label='Vurro et al. (2014), human-acuity proxy')
     ax2.set_xlabel('eccentricity (deg)')
     ax2.set_ylabel('phosphene sigma (deg)')
     ax2.set_title(f'Phosphene size at I_max = {array.max_current_ua:.0f} uA')
@@ -226,14 +219,6 @@ def main():
           f"{bracket['ceiling_fraction'] * 100:.0f}%  ({bracket['regime']})")
     print()
 
-    print(calibration.report(parts['electrode_array'], 80.0))
-    print()
-
-    malpeli = MalpeliDensityMagnification.from_atlas(parts['atlas'], params)
-    print(malpeli.consistency_report(reference=parts['magnification']
-                                     if hasattr(parts['magnification'],
-                                                'at_eccentricity') else None))
-    print()
 
     plot_electrodes(simulator, out_dir / 'lgn_demo_electrodes.png')
     plot_percept(simulator, out_dir / 'lgn_demo_percept.png')

@@ -171,7 +171,7 @@ class TestGradients:
         assert float(amp.grad.abs().sum()) == 0.0
 
     def test_soft_threshold_gradient_beats_the_hard_gate(self, built):
-        """The reason the soft threshold is on by default (12 Sep 2026).
+        """The reason the soft threshold is on by default.
 
         Checked just above the rheobase, where tissue activation is
         genuinely nonzero but the electrode is still subthreshold --

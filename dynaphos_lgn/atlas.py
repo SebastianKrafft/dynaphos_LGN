@@ -1,8 +1,5 @@
 """Loading the Erwin et al. (1999) macaque LGN atlas, and fitting the
 per-voxel Jacobian of its retinotopy.
-
-File format, the two regions the atlas constructs rather than measures,
-and the reasoning behind the Jacobian fit are all in `docs/atlas.md`.
 """
 from pathlib import Path
 from typing import Mapping, Optional, Tuple, Union
@@ -71,7 +68,7 @@ class ErwinAtlas(Atlas):
     @property
     def IPSI_FLAT_INCLINATION_DEG(self) -> float:
         """Coarse +-135 deg placeholder for the two ipsilateral-hemifield
-        quadrants, not a resolved value -- see `docs/atlas.md`."""
+        quadrants, not a resolved value."""
         return require(self.params, 'atlas.ipsi_flat_inclination_deg')
 
     def is_ipsi_sentinel(self, inclination: Optional[np.ndarray] = None
@@ -182,10 +179,10 @@ class JacobianAtlas(Atlas):
     :ivar transition_probe_residual: Longer-range extrapolation
         mismatch, deg, behind `unreliable_beyond_neighborhood_flag`.
     :ivar isotropic_flag: Inside the radius where the atlas's retinotopy
-        is isotropic by construction (`docs/atlas.md`).
+        is isotropic by construction.
     :ivar unreliable_beyond_neighborhood_flag: Do not extrapolate this
         voxel's Jacobian past its fit neighbourhood. Not a tear
-        detector -- see `docs/atlas.md`.
+        detector.
     """
 
     def __init__(self, params: Mapping):
@@ -213,8 +210,8 @@ class JacobianAtlas(Atlas):
         Differentiates the Cartesian (x, y) representation of the visual
         field rather than raw (eccentricity, inclination), which is
         polar and so has a foveal singularity and a locally varying
-        scale. `docs/atlas.md` covers that and the batched normal-
-        equations scheme the body uses to stay within memory.
+        scale. The body fits by batched normal equations to stay
+        within memory.
 
         All fit parameters -- neighborhood radius, minimum neighbor
         count, the ridge regularizer, the transition-probe distance and
@@ -356,7 +353,7 @@ class JacobianAtlas(Atlas):
         # tear and never sees it. Instead extrapolate each voxel's own
         # Jacobian out to a probe point and compare against the atlas.
         # Smooth curvature contributes mismatch there too, which is why
-        # the threshold sits well above the noise floor -- docs/atlas.md.
+        # the threshold sits well above the noise floor.
         probe_vox = transition_probe_distance_vox
         probe_offsets = [(probe_vox, 0, 0), (-probe_vox, 0, 0),
                          (0, probe_vox, 0), (0, -probe_vox, 0),

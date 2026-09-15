@@ -17,7 +17,7 @@ Two renderers, chosen per electrode rather than globally:
 
 Both return activation maps normalised to a peak of 1, the convention
 the Dynaphos state machinery expects: amplitude lives in `brightness`,
-shape lives here. See `docs/electrodes-and-rendering.md`.
+shape lives here.
 """
 from __future__ import annotations
 
