@@ -31,3 +31,7 @@ clips/
 
 # Independent research
 /dynaphos_lgn/research
+
+# Dated validation reports written by the check_*.py scripts. Tracked on
+# the research branch, which keeps those scripts; ignored here.
+/research/
