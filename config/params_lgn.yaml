@@ -328,18 +328,6 @@ magnification:
 
   eccentricity_table_bin_width_deg: 1.0
 
-  # Validation checkpoints. Used once, in preprocessing, never in the
-  # forward pass.
-  checkpoints:
-    # Connolly & Van Essen (1984). QUALITATIVE -- a checkpoint, never
-    # a target.
-    anisotropy_ratio: [2.0, 3.0]
-    # Vurro, Crowell & Pezaris (2014). HUMAN acuity as a magnification
-    # proxy: order-of-magnitude cross-reference only.
-    vurro_phosphene_sigma:
-      slope_per_deg: 0.043
-      intercept_deg: 0.083
-
 # ----------------------------------------------------------------------
 # Receptive fields
 # ----------------------------------------------------------------------
