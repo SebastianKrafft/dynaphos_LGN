@@ -1,6 +1,22 @@
 # About the project
 A fully differentiable and biologically plausible simulation of cortical prosthetic vision, which can be used for end-to-end optimization.
 
+## This fork: an LGN adaptation
+
+This is a fork of [neuralcodinglab/dynaphos](https://github.com/neuralcodinglab/dynaphos) that adds `dynaphos_lgn`, a simulator for electrical stimulation of the **lateral geniculate nucleus** rather than V1.
+
+- `dynaphos/`: the original V1/cortex package, **unmodified**, kept as the reference baseline and reused for the generic pieces (image processing, differentiable utilities, the leaky-integrator state classes).
+- `dynaphos_lgn/`: the LGN adaptation: atlas-based retinotopic lookup, per-voxel Jacobian magnification, per-lamina recruitment, and two phosphene renderers. See [`dynaphos_lgn/README.md`](dynaphos_lgn/README.md).
+- `config/params_lgn.yaml`: LGN parameters, annotated with where every number comes from.
+- `examples/demo_simulator_lgn.py`: end-to-end demo, including a gradient-descent optimisation and a figure showing the uncertainty in the transplanted excitability constant.
+
+```
+python examples/demo_simulator_lgn.py --synthetic   # no atlas download needed
+python -m pytest dynaphos_lgn/test -q
+```
+
+The LGN adaptation is deliberately built for modularity rather than accuracy: almost nothing about LGN stimulation has been measured, so every parameter is transplanted, borrowed across species, or fitted in-project. Every one of them lives in `config/params_lgn.yaml`, which names its source. [`docs/`](docs/README.md) explains the reasoning a reader of the code needs.
+
 ## Installation
 `pip install dynaphos`
 

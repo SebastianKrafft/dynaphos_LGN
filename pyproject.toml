@@ -23,4 +23,15 @@ classifiers = [
 "Homepage" = "https://github.com/neuralcodinglab/dynaphos.git"
 
 [tool.setuptools]
-packages = ["dynaphos"]
+packages = ["dynaphos", "dynaphos_lgn"]
+
+[tool.pytest.ini_options]
+# The LGN test suite runs against a synthetic atlas by default, so it
+# needs no separately downloaded data and finishes in seconds. Tests
+# that genuinely need the real Erwin atlas skip themselves when it is
+# absent rather than silently passing.
+testpaths = ["dynaphos_lgn/test", "test"]
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "slow: test takes appreciably longer than the rest of the suite",
+]

@@ -1,0 +1,6 @@
+# Normalize text files to LF in the repository regardless of each
+# contributor's core.autocrlf setting; Windows checkouts still get CRLF
+# on disk via core.autocrlf. This makes the existing LF-in-storage
+# convention explicit instead of depending on every contributor having
+# the same global git config.
+* text=auto

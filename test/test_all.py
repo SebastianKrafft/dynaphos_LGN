@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import cv2
 import pytest
 import torch
@@ -15,7 +17,9 @@ from dynaphos.utils import (to_tensor, to_numpy, get_data_kwargs, load_params,
                             load_coordinates_from_yaml, Map)
 
 
-PARAMS_PATH = '../config/params.yaml'
+DATA_DIR = Path(__file__).resolve().parent / 'data'
+CONFIG_DIR = Path(__file__).resolve().parent.parent / 'config'
+PARAMS_PATH = str(CONFIG_DIR / 'params.yaml')
 MAPPING_MODELS = ['monopole', 'dipole', 'wedge-dipole']
 
 
@@ -37,7 +41,8 @@ def simulator(params, rng):
 
 def get_simulator(params, rng):
     coordinates_cortex = load_coordinates_from_yaml(
-        '../config/grid_coords_dipole_valid.yaml', n_coordinates=100, rng=rng)
+        str(CONFIG_DIR / 'grid_coords_dipole_valid.yaml'),
+        n_coordinates=100, rng=rng)
     coordinates_cortex = Map(*coordinates_cortex)
     coordinates_visual_field = get_visual_field_coordinates_from_cortex_full(
         params['cortex_model'], coordinates_cortex, rng)
@@ -46,7 +51,7 @@ def get_simulator(params, rng):
 
 @pytest.fixture
 def stimulus(params):
-    stimulus = np.load('data/stimulus.npy')
+    stimulus = np.load(str(DATA_DIR / 'stimulus.npy'))
     data_kwargs = get_data_kwargs(params)
     return to_tensor(stimulus, **data_kwargs)
 
@@ -94,7 +99,7 @@ class TestCorticalModels:
 
     def test_init_full_view(self):
         visual_field = get_visual_field_coordinates_grid()
-        z_expected = np.load('data/z_full_view.npy')
+        z_expected = np.load(str(DATA_DIR / 'z_full_view.npy'))
         assert np.isclose(visual_field.complex, z_expected).all()
 
     @pytest.mark.parametrize('mapping_model', MAPPING_MODELS)
@@ -103,7 +108,7 @@ class TestCorticalModels:
         p['model'] = mapping_model
         cortex_map = get_cortex_coordinates_default(p)
         x, y = cortex_map.cartesian
-        coordinates = np.load(f'data/coordinates_{mapping_model}.npz')
+        coordinates = np.load(str(DATA_DIR / f'coordinates_{mapping_model}.npz'))
         assert np.isclose(x, coordinates['x']).all()
         assert np.isclose(y, coordinates['y']).all()
 
@@ -121,34 +126,34 @@ class TestCorticalModels:
         coordinates_visual_field = get_visual_field_coordinates_grid()
         z_all = coordinates_visual_field.complex
         z = remove_out_of_view(z_all)
-        valid_electrodes = np.load('data/valid_electrodes.npy')
+        valid_electrodes = np.load(str(DATA_DIR / 'valid_electrodes.npy'))
         assert np.array_equal(z, z_all[valid_electrodes])
 
 
 class TestSimulator:
     def test_generate_phosphene_maps(self, simulator):
         phosphene_maps = to_numpy(simulator.phosphene_maps)
-        phosphene_maps_expected = np.load('data/phosphene_map.npy')
+        phosphene_maps_expected = np.load(str(DATA_DIR / 'phosphene_map.npy'))
         assert np.isclose(phosphene_maps, phosphene_maps_expected, atol=1e-8).all()
 
     def test_update(self, simulator, stimulus):
         simulator.update(stimulus)
         sigma = to_numpy(simulator.sigma.get())
         trace = to_numpy(simulator.trace.get())
-        sigma_expected = np.load('data/sigma.npy')
-        trace_expected = np.load('data/trace.npy')
+        sigma_expected = np.load(str(DATA_DIR / 'sigma.npy'))
+        trace_expected = np.load(str(DATA_DIR / 'trace.npy'))
         assert np.isclose(sigma, sigma_expected, atol=1e-8).all()
         assert np.isclose(trace, trace_expected, atol=1e-8).all()
 
     def test_gaussian_activation(self, simulator, stimulus):
         simulator.update(stimulus)
         activation = to_numpy(simulator.gaussian_activation())
-        activation_expected = np.load('data/activation.npy')
+        activation_expected = np.load(str(DATA_DIR / 'activation.npy'))
         assert np.isclose(activation, activation_expected, atol=1e-8).all()
 
     def test_call(self, simulator, stimulus):
         phosphenes = to_numpy(simulator(stimulus))
-        phosphenes_expected = np.load('data/output.npy')
+        phosphenes_expected = np.load(str(DATA_DIR / 'output.npy'))
         assert np.isclose(phosphenes, phosphenes_expected, atol=1e-8).all()
 
 
@@ -158,13 +163,13 @@ class TestFunctional:
         shape = params['run']['resolution']
         image = rng.random(shape) * 1e-4
         stimulus = simulator.sample_stimulus(image)
-        stimulus_expected = np.load('data/stimulus.npy')
+        stimulus_expected = np.load(str(DATA_DIR / 'stimulus.npy'))
         assert np.isclose(stimulus, stimulus_expected, atol=1e-8).all()
 
     def test_image(self, params, rng):
         params['thresholding']['use_threshold'] = False
         shape = params['run']['resolution']
-        frame = cv2.imread('data/donders.png')
+        frame = cv2.imread(str(DATA_DIR / 'donders.png'))
         frame = cv2.resize(frame, shape)
         frame = frame[::-1]
         frame = 255 - cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -173,13 +178,13 @@ class TestFunctional:
         simulator = get_simulator(params, rng)
         stimulus = simulator.sample_stimulus(frame, rescale=True)
         phosphenes = to_numpy(simulator(stimulus))
-        phosphenes_expected = np.load('data/phosphenes_donders.npy')
+        phosphenes_expected = np.load(str(DATA_DIR / 'phosphenes_donders.npy'))
         assert np.isclose(phosphenes, phosphenes_expected, atol=1e-8).all()
 
     def test_brightness(self, params, rng):
         fps = 500
         stimulus_sequence = np.concatenate([np.ones(83), np.zeros(417)])
-        data = pd.read_csv('data/Fernandez_2021_fig6A.csv')
+        data = pd.read_csv(str(DATA_DIR / 'Fernandez_2021_fig6A.csv'))
 
         params['cortex_model']['dropout_rate'] = 0
         params['default_stim']['pw_default'] = 170e-6
@@ -219,8 +224,8 @@ class TestFunctional:
                 results.loc[results.stim_condition == i, 'activation'].max())
         activation = np.array(activation)
         brightness = np.array(brightness)
-        activation_expected = np.load('data/fernandez_activation_fit.npy')
-        brightness_expected = np.load('data/fernandez_brightness_fit.npy')
+        activation_expected = np.load(str(DATA_DIR / 'fernandez_activation_fit.npy'))
+        brightness_expected = np.load(str(DATA_DIR / 'fernandez_brightness_fit.npy'))
         assert np.isclose(activation, activation_expected).all()
         assert np.isclose(brightness, brightness_expected).all()
 
@@ -262,6 +267,6 @@ class TestFunctional:
         results['stimulation'] = stim_sequences
         results['fps'] = fps
         results['time'] = results.index.copy() / fps
-        results_expected = pd.read_pickle('data/results_dynamics.pkl')
+        results_expected = pd.read_pickle(str(DATA_DIR / 'results_dynamics.pkl'))
         assert np.isclose(results.to_numpy(),
                           results_expected.to_numpy()).all()
