@@ -225,7 +225,10 @@ class JacobianMagnification(MagnificationModel):
         :param voxel_indices: (n, 3) integer array.
         """
         idx = tuple(np.asarray(voxel_indices, dtype=int).T)
-        jac = self.jacobian_atlas.jacobian[idx]
+        # Through `jacobian_at`, not `jacobian[idx]`, so a mirrored
+        # atlas can serve the lookup from the left LGN's cached fit
+        # instead of materialising a reflected copy of the whole field.
+        jac = self.jacobian_atlas.jacobian_at(voxel_indices)
         major, minor, orientation = self.decompose(jac)
         valid = self.jacobian_atlas.jacobian_valid[idx]
         return LocalMagnification(
@@ -277,8 +280,7 @@ class JacobianMagnification(MagnificationModel):
                 ea.layer, resolve_class_codes(self.params, cell_class))
 
         idx = np.argwhere(mask)
-        major, minor, orientation = self.decompose(
-            ja.jacobian[tuple(idx.T)])
+        major, minor, orientation = self.decompose(ja.jacobian_at(idx))
         ecc = ea.eccentricity_deg[tuple(idx.T)]
 
         edges = np.arange(0, np.nanmax(ecc) + bin_width_deg, bin_width_deg)

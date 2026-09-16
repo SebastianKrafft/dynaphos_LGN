@@ -115,6 +115,11 @@ class LGNElectrodeArray:
     :param magnification_model: Fallback/override magnification model.
     :param rng: Used only for the scatter subsample.
 
+    The array takes its hemisphere from the atlas it is built on, so an
+    array on a `MirroredAtlas` is the right LGN's and its electrodes sit
+    in the left hemifield. Nothing else in this class changes between
+    the two: the mirror is entirely inside the atlas and the Jacobian.
+
     Everything else comes from the config: `electrodes.max_current_ua`
     (the largest current the protocol will ever deliver, which sizes the
     candidate neighbourhood -- the array is then valid for any current at
@@ -147,6 +152,8 @@ class LGNElectrodeArray:
                                        'electrodes.max_candidate_voxels')
         n_scatter_points = require(params, 'electrodes.n_scatter_points')
 
+        self.hemisphere = getattr(atlas, 'hemisphere', 'left')
+
         self.voxel_indices = np.asarray(voxel_indices, dtype=int)
         if self.voxel_indices.ndim != 2 or self.voxel_indices.shape[1] != 3:
             raise ValueError("voxel_indices must have shape "
@@ -166,17 +173,24 @@ class LGNElectrodeArray:
     @classmethod
     def spread_in_visual_field(cls, atlas, params: Mapping,
                                rng: Optional[np.random.Generator] = None,
+                               n_electrodes: Optional[int] = None,
                                **kwargs) -> 'LGNElectrodeArray':
         """Farthest-point-sample electrodes for even visual-field coverage.
 
         Spreads in retinotopic rather than physical space, and the
         shipped `electrodes.depth_selection` is ``random`` so electrodes
         do not all land in one lamina.
+
+        :param n_electrodes: How many to place. Defaults to
+            `electrodes.n_electrodes`, which is per nucleus; the builder
+            passes the per-hemisphere override when the config sets one.
         """
         from dynaphos_lgn.lgn_utils import get_electrode_layout
         rng = np.random.default_rng() if rng is None else rng
+        if n_electrodes is None:
+            n_electrodes = require(params, 'electrodes.n_electrodes')
         _, voxels = get_electrode_layout(
-            atlas, require(params, 'electrodes.n_electrodes'),
+            atlas, n_electrodes,
             cell_class=require(params, 'electrodes.cell_class'),
             min_eccentricity=require(params,
                                      'electrodes.min_eccentricity_deg'),
@@ -386,7 +400,7 @@ class LGNElectrodeArray:
 
         if jacobian_atlas is not None:
             self.magnification_model = JacobianMagnification(
-                jacobian_atlas, self.atlas)
+                jacobian_atlas, self.params, self.atlas)
             local = self.magnification_model.at_voxels(self.voxel_indices)
             missing = ~local.valid | ~np.isfinite(local.major_deg_per_mm)
         elif magnification_model is not None:
@@ -600,8 +614,13 @@ class LGNElectrodeArray:
         return cells.sum(axis=1) * self.voxels_per_candidate
 
     def describe(self) -> str:
+        hemifield = 'right' if self.hemisphere == 'left' else 'left'
+        mirrored = ('' if self.hemisphere == 'left'
+                    else ', mirrored from the published left atlas')
         lines = [
             f"LGNElectrodeArray: {self.n_electrodes} electrodes",
+            f"  nucleus           : {self.hemisphere} LGN -> {hemifield} "
+            f"hemifield{mirrored}",
             f"  eccentricity      : "
             f"{np.nanmin(self.eccentricity_deg):.2f} - "
             f"{np.nanmax(self.eccentricity_deg):.2f} deg",

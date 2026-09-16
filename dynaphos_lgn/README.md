@@ -44,7 +44,7 @@ amplitude, pulse width, frequency
 | module | what it owns |
 |---|---|
 | `params.py` | config access: `require` (dotted path, loud failure), `optional`, `resolve_class_codes` |
-| `atlas.py` | Erwin et al. (1999) file loading; per-voxel local Jacobian of the retinotopy, with caching and confidence flags |
+| `atlas.py` | Erwin et al. (1999) file loading; per-voxel local Jacobian of the retinotopy, with caching and confidence flags; the mirrored right nucleus |
 | `synthetic_atlas.py` | a small closed-form stand-in, so tests and demos need no 145 MB download. **Never a result** |
 | `magnification.py` | Malpeli et al. (1996) closed forms; three magnification models (Jacobian / atlas-gradient / density-derived) |
 | `receptive_fields.py` | difference-of-Gaussians centre and surround sizes by cell class |
@@ -52,6 +52,7 @@ amplitude, pulse width, frequency
 | `electrodes.py` | all setup-time geometry: voxel lookup, candidate gather, layer grouping, per-electrode flags |
 | `rendering.py` | the elliptical-Gaussian shortcut and the per-voxel scatter renderer |
 | `simulator.py` | the forward pass, reusing Dynaphos's temporal-dynamics state classes unchanged |
+| `bilateral.py` | both nuclei at once: one percept over the whole visual field |
 | `build.py` | one call from a YAML config to a working simulator |
 
 ## Where the numbers live
@@ -106,6 +107,16 @@ print(simulator.describe())                     # array geometry + flags
 image = simulator(torch.full((simulator.num_phosphenes,), 80e-6))
 ```
 
+That covers the **right half** of the visual field. For the whole of it,
+ask for both nuclei -- in the config, or per build:
+
+```python
+simulator, parts = build_simulator(params, hemispheres=['left', 'right'])
+```
+
+and widen `run.view_angle`, because there is now twice as much field to
+show. See "One nucleus or two" below.
+
 Or run the demo, which writes four figures including an end-to-end
 optimisation and a picture of the K uncertainty:
 
@@ -123,6 +134,61 @@ python -m dynaphos_lgn.build --cache-jacobian
 
 Roughly 90 s and 4.2 GB of peak RAM at the atlas's 21.5M voxels, writing
 a ~110 MB `JACOBIAN.npz` beside the `.DAT` files.
+
+## One nucleus or two
+
+The published atlas is a single **left** LGN, and one LGN represents the
+**contralateral** hemifield. So on its own the package reaches the right
+half of the visual field and no more: the left half of every rendered
+frame stays black whatever you feed it.
+
+`atlas.hemispheres` decides how much is built.
+
+```yaml
+atlas:
+  hemispheres: [left]           # [left] | [right] | [left, right]
+```
+
+`[left]` is the default and reproduces everything this package did
+before the key existed. `[left, right]` adds a second nucleus and
+returns a `BilateralLGNSimulator` instead, which holds one
+`LGNPhospheneSimulator` per nucleus and adds their percepts:
+
+```
+percept = clamp( sum over BOTH arrays of brightness * p(detect) *
+                 activation map , 0, 1 )
+```
+
+The clamp lands once, over both, so a bilateral run agrees exactly with
+what a single array holding the same electrodes would have produced.
+Electrodes are numbered left nucleus first; `electrode_slices` and
+`hemisphere_of_electrode` say which is which, and `n_electrodes` is
+**per nucleus**, with `n_electrodes_by_hemisphere` overriding it on one
+side for an asymmetric implant.
+
+**The right nucleus is the left one reflected, not a second dataset.**
+`MirroredAtlas` mirrors three things and nothing else: the ML grid axis,
+the inclination (`I -> 180 - I`, i.e. visual-field `x -> -x`), and the
+ipsilateral placeholder, which sits at ±135° on the left and so reads as
+±45° there. Eccentricity, layer identity and cell counts are untouched
+by a reflection and are exposed as NumPy views of the left atlas's own
+arrays, so the second nucleus costs one extra inclination volume rather
+than a second copy of everything. The Jacobian is derived the same way:
+reflecting turns `J` into `diag(-1, 1) J diag(-1, 1, 1)`, an orthogonal
+map on each side, so **both principal magnifications -- and so every
+phosphene size -- are unchanged**, and only the major axis's orientation
+flips. The cached fit is reused; nothing is refitted.
+
+What that assumes is in "Known gaps" below, and travels with every
+electrode as `hemisphere == 'right'` and in `describe()`.
+
+```
+python examples/demo_bilateral_lgn.py
+```
+
+writes a four-panel figure: where the electrodes sit by nucleus, a
+target image spanning both hemifields, what one nucleus perceives of it,
+and what two do.
 
 ## Four design decisions worth knowing about
 
@@ -156,6 +222,25 @@ readings are computed and named.
 
 ## Known gaps and open items
 
+* **The right LGN is an assumption, not a measurement.** There is one
+  reconstructed nucleus in the world and it is a left one, so the right
+  nucleus here is its mirror image: same volume, same laminar order,
+  same retinotopy with the hemifield flipped. That is the textbook
+  first approximation and nothing more. Real left and right LGNs differ
+  in volume and in cell count both between individuals and between
+  sides, and there is no second atlas to say by how much — so the left
+  half of a bilateral percept carries its counterpart's uncertainty
+  **plus** the assumption of symmetry.
+* **The vertical meridian is represented twice.** Voxels at
+  inclination ±90° reflect onto themselves, so a bilateral simulation
+  covers that strip from both nuclei. The nasotemporal overlap it
+  stands for is real, but nothing here models it — the duplication is
+  inherited from the reflection, not chosen, and its width is the
+  atlas's quantisation rather than a measured overlap.
+* **Nothing couples the two nuclei.** They are independent simulators
+  with independent state, which is right for the tissue, but it also
+  means no binocular or interhemispheric interaction is modelled at
+  all.
 * **K = 675 µA/mm² is transplanted from macaque V1 and unvalidated.** No
   LGN- or thalamus-specific current-spread constant exists in the
   literature at any confidence level. An earlier attempt to back-derive

@@ -1,6 +1,14 @@
 """Loading the Erwin et al. (1999) macaque LGN atlas, and fitting the
 per-voxel Jacobian of its retinotopy.
+
+The published atlas is a single **left** LGN, and one LGN represents the
+**contralateral** hemifield -- so on its own it covers only the right
+half of the visual field. `MirroredAtlas` and `MirroredJacobianAtlas`
+reflect it across the midsagittal plane to stand in for the right LGN,
+so that the two together cover the whole field. That reflection is an
+assumption, not data; `MirroredAtlas` documents exactly what it claims.
 """
+import logging
 from pathlib import Path
 from typing import Mapping, Optional, Tuple, Union
 
@@ -10,6 +18,10 @@ from dynaphos_lgn.params import require
 
 
 class Atlas:
+    #: Which nucleus this volume represents. The published data is a
+    #: left LGN; `MirroredAtlas` is the only thing that changes this.
+    hemisphere = 'left'
+
     def __init__(self, params: Optional[Mapping] = None):
         self.params = params
 
@@ -71,6 +83,17 @@ class ErwinAtlas(Atlas):
         quadrants, not a resolved value."""
         return require(self.params, 'atlas.ipsi_flat_inclination_deg')
 
+    @property
+    def ipsi_sentinel_values(self) -> list:
+        """The inclination values that mark the ipsilateral placeholder.
+
+        A property rather than a literal because `MirroredAtlas` carries
+        the same placeholder reflected onto the other side, where it
+        reads as a different pair of numbers.
+        """
+        flat = self.IPSI_FLAT_INCLINATION_DEG
+        return [-flat, flat]
+
     def is_ipsi_sentinel(self, inclination: Optional[np.ndarray] = None
                          ) -> np.ndarray:
         """True where the coarse +-135 deg ipsilateral placeholder is set.
@@ -80,8 +103,7 @@ class ErwinAtlas(Atlas):
         """
         if inclination is None:
             inclination = self.inclination
-        flat = self.IPSI_FLAT_INCLINATION_DEG
-        return np.isin(inclination, [-flat, flat])
+        return np.isin(inclination, self.ipsi_sentinel_values)
 
     def build_atlas(self, atlas_dir: Optional[Union[str, Path]] = None
                     ) -> 'ErwinAtlas':
@@ -124,7 +146,8 @@ class ErwinAtlas(Atlas):
     def horsley_clarke_to_index(self, ml_mm: Union[float, np.ndarray],
                                 dv_mm: Union[float, np.ndarray],
                                 ap_mm: Union[float, np.ndarray],
-                                validate: bool = True
+                                validate: bool = True,
+                                hemisphere: Optional[str] = None
                                 ) -> tuple:
         """Convert Horsley-Clarke stereotaxic coordinates (mm) to the
         nearest integer index/indices into the atlas's (ML, DV, AP) voxel
@@ -133,19 +156,36 @@ class ErwinAtlas(Atlas):
         :param ml_mm: Medial-lateral coordinate(s), mm.
         :param dv_mm: Dorsal-ventral coordinate(s), mm.
         :param ap_mm: Anterior-posterior coordinate(s), mm.
+        `ml_mm` is the atlas's own coordinate: lateral DISTANCE from the
+        midline, always positive, exactly as Erwin et al. document it.
+        It does not say which nucleus is meant -- pass `hemisphere` for
+        that, and note that each atlas object IS one nucleus, so the
+        argument is checked rather than dispatched on.
+
         :param validate: If True (default), raise IndexError when any
             resulting index falls outside the atlas volume. If False,
             indices are returned unclipped and out-of-bounds values are
             left to the caller to handle.
+        :param hemisphere: 'left' or 'right'. Optional; when given it
+            must match this atlas's own `hemisphere`, so that a
+            coordinate meant for the other nucleus fails loudly instead
+            of silently landing in this one.
         :return: (ml_idx, dv_idx, ap_idx), each an int (scalar input) or
             an integer np.ndarray (array input), usable to directly index
             self.eccentricity / self.inclination / self.layer / self.cells.
         """
+        if hemisphere is not None and hemisphere != self.hemisphere:
+            raise ValueError(
+                f"This atlas is the {self.hemisphere} LGN, but the "
+                f"coordinate was given for the {hemisphere!r} one. Build "
+                f"the other nucleus (dynaphos_lgn.atlas.MirroredAtlas, or "
+                f"atlas.hemispheres in the config) and ask it instead.")
+
         def to_index(mm, origin):
             return np.round((np.asarray(mm) - origin)
                             / self._voxel_size_mm).astype(int)
 
-        ml_idx = to_index(ml_mm, self._origin_ml_mm)
+        ml_idx = self._ml_index(to_index(ml_mm, self._origin_ml_mm))
         dv_idx = to_index(dv_mm, self._origin_dv_mm)
         ap_idx = to_index(ap_mm, self._origin_ap_mm)
 
@@ -161,6 +201,10 @@ class ErwinAtlas(Atlas):
         if ml_idx.ndim == 0:
             return int(ml_idx), int(dv_idx), int(ap_idx)
         return ml_idx, dv_idx, ap_idx
+
+    def _ml_index(self, index: np.ndarray) -> np.ndarray:
+        """Hook for `MirroredAtlas`, whose ML axis runs the other way."""
+        return index
 
 
 class JacobianAtlas(Atlas):
@@ -390,6 +434,16 @@ class JacobianAtlas(Atlas):
         self.unreliable_beyond_neighborhood_flag = unreliable
         return self
 
+    def jacobian_at(self, voxel_indices: np.ndarray) -> np.ndarray:
+        """The (n, 2, 3) Jacobians at the given (ml, dv, ap) indices.
+
+        The only way the rest of the package reaches into `jacobian`.
+        `MirroredJacobianAtlas` overrides it so that the reflected
+        nucleus never has to materialise a second full-grid copy.
+        """
+        idx = tuple(np.asarray(voxel_indices, dtype=int).T)
+        return self.jacobian[idx]
+
     @property
     def singular_values(self):
         """(major, minor, orientation_rad) of every voxel's Jacobian.
@@ -478,6 +532,281 @@ class JacobianAtlas(Atlas):
             data['near_transition_flag']
         atlas.atlas_shape = atlas.jacobian_valid.shape
         return atlas
+
+
+def mirror_inclination(inclination, scale: float = 1.0,
+                       sentinel: Optional[float] = None):
+    """Reflect inclination across the vertical meridian: I -> 180 - I.
+
+    A voxel's visual-field position is (E cos I, E sin I), so this is
+    exactly the map that sends x to -x and leaves y alone: the right
+    hemifield becomes the left one, and up stays up.
+
+    :param inclination: Values to reflect, in the atlas's own stored
+        units (degrees x `scale`).
+    :param scale: The stored-integer scale factor, so the wrap back to
+        (-180, 180] happens in the right units.
+    :param sentinel: A "not applicable" value to pass through
+        untouched. Without it the 999 marker would reflect into an
+        ordinary-looking angle and the voxel would start reading as
+        valid.
+    :return: The reflected values, in the input's dtype.
+    """
+    values = np.asarray(inclination)
+    half_turn = 180.0 * scale
+    full_turn = 360.0 * scale
+    mirrored = half_turn - values.astype(np.float64)
+    # Inputs live in [-180, 180] x scale, so the reflection lands in
+    # [0, 360] x scale and a single subtraction wraps it back.
+    mirrored = np.where(mirrored > half_turn, mirrored - full_turn, mirrored)
+    if sentinel is not None:
+        mirrored = np.where(values == sentinel, sentinel, mirrored)
+    if np.issubdtype(values.dtype, np.integer):
+        mirrored = np.round(mirrored)
+    return mirrored.astype(values.dtype)
+
+
+class MirroredAtlas(ErwinAtlas):
+    """The right LGN, as the mirror image of the published left one.
+
+    Erwin et al. reconstructed one nucleus, so on its own this package
+    sees only the hemifield that nucleus represents. Reflecting it
+    across the midsagittal plane gives a stand-in for the other, and the
+    two together span the whole visual field.
+
+    **What this claims.** Only that the two nuclei are mirror images:
+    same volume, same laminar order, same retinotopy with the hemifield
+    flipped. That is the textbook first approximation and nothing more.
+    Real left and right LGNs differ in volume and cell count both
+    between individuals and between sides, and there is no second
+    reconstructed atlas to say by how much. Every voxel here therefore
+    inherits its left-hemisphere counterpart's uncertainty **plus** the
+    assumption of symmetry -- which is why everything built on it
+    carries `hemisphere == 'right'` through to the output rather than
+    blending in.
+
+    **What is reflected.** Three things, and nothing else:
+
+    - the ML grid axis, so voxel ``i`` here is voxel ``n - 1 - i``
+      there;
+    - the inclination, ``I -> 180 - I``, i.e. visual-field ``x -> -x``;
+    - the ipsilateral placeholder, which sits at +-135 deg in the left
+      nucleus and so reads as +-45 deg here. It marks the same thing --
+      tissue coarsely representing the *other* hemifield -- and
+      `atlas.exclude_ipsi_flat_inclination` still drops it.
+
+    Eccentricity, layer identity and cell counts are unchanged by a
+    reflection, and are exposed as NumPy views of the left atlas's own
+    arrays: this costs one extra inclination volume, not a second copy
+    of everything.
+
+    The vertical meridian is the one place the two nuclei meet. Voxels
+    at I = +-90 deg reflect onto themselves, so a bilateral simulation
+    represents that strip twice. The nasotemporal overlap it stands for
+    is real, but nothing here models it -- the duplication is inherited,
+    not chosen.
+
+    :param atlas: A built `ErwinAtlas` (or `SyntheticAtlas`) of the left
+        LGN.
+    :param params: Parameter dictionary. Defaults to the source atlas's.
+    """
+
+    hemisphere = 'right'
+
+    def __init__(self, atlas: ErwinAtlas, params: Optional[Mapping] = None):
+        params = atlas.params if params is None else params
+        super().__init__(params)
+        if getattr(atlas, 'hemisphere', 'left') != 'left':
+            raise ValueError(
+                f"MirroredAtlas reflects the published LEFT LGN, but was "
+                f"given a {atlas.hemisphere!r} one. Mirroring a mirror is "
+                f"the identity -- use the original atlas instead.")
+        self.base = atlas
+        # The source atlas wins on grid geometry: a SyntheticAtlas is
+        # deliberately a different shape from the config's.
+        self.atlas_shape = atlas.atlas_shape
+        self._voxel_size_mm = atlas._voxel_size_mm
+        self._ml_axis = int(require(params, 'atlas.mirror.ml_axis'))
+        self.build_atlas()
+
+    @property
+    def is_synthetic(self) -> bool:
+        """A mirror is exactly as synthetic as what it reflects."""
+        return bool(getattr(self.base, 'is_synthetic', False))
+
+    @property
+    def _reverse(self) -> tuple:
+        """Index tuple reversing the ML axis, as a view."""
+        return tuple(slice(None, None, -1) if axis == self._ml_axis
+                     else slice(None)
+                     for axis in range(len(self.atlas_shape)))
+
+    def build_atlas(self, atlas_dir=None) -> 'MirroredAtlas':
+        """Reflect the source atlas.
+
+        `atlas_dir` is accepted and ignored: there is no second set of
+        files to read.
+        """
+        base = self.base
+        flip = self._reverse
+
+        # Free views: a reflection changes none of these values, only
+        # where they sit.
+        self.eccentricity = base.eccentricity[flip]
+        self.layer = base.layer[flip]
+        self.cells = base.cells[flip]
+        self.eccentricity_deg = base.eccentricity_deg[flip]
+        self.cells_per_voxel = base.cells_per_voxel[flip]
+
+        # The one array that has to be computed rather than viewed.
+        self.inclination = mirror_inclination(
+            base.inclination[flip], scale=self._incl_scale,
+            sentinel=self._missing_ecc_incl)
+        self.inclination_deg = (self.inclination
+                                / np.float32(self._incl_scale))
+
+        # Recomputed from the reflected arrays rather than viewed from
+        # the source, so a slip in the inclination transform shows up
+        # here as a changed voxel count instead of hiding.
+        self.valid = (self.eccentricity != self._missing_ecc_incl) & \
+                     (self.inclination != self._missing_ecc_incl) & \
+                     (self.layer != self._missing_layer)
+        return self
+
+    @property
+    def ipsi_sentinel_values(self) -> list:
+        """+-135 deg in the left nucleus reflects to +-45 deg here.
+
+        Reflected with `scale=1.0` because `is_ipsi_sentinel` compares
+        the raw volume against this degree-valued placeholder directly,
+        as it always has.
+        """
+        flat = self.IPSI_FLAT_INCLINATION_DEG
+        return [float(mirror_inclination(v)) for v in (-flat, flat)]
+
+    def _ml_index(self, index: np.ndarray) -> np.ndarray:
+        """Reflect an ML index, so that one lateral distance from the
+        midline picks out mirror-image tissue in the two nuclei."""
+        return self.atlas_shape[self._ml_axis] - 1 - index
+
+    def analytic_magnification_deg_per_mm(self, eccentricity_deg):
+        """Forwarded from a synthetic source atlas, unchanged.
+
+        A reflection is orthogonal on both sides of the Jacobian, so it
+        leaves both principal magnifications exactly as they were.
+        """
+        return self.base.analytic_magnification_deg_per_mm(eccentricity_deg)
+
+
+class MirroredJacobianAtlas(JacobianAtlas):
+    """The Jacobian field of a `MirroredAtlas`, without refitting it.
+
+    Reflecting the ML axis and the visual field's x axis turns each
+    Jacobian ``J`` into ``diag(-1, 1) J diag(-1, 1, 1)``: the components
+    coupling a reflected axis to an unreflected one change sign, the
+    rest do not. That is an orthogonal map on each side, so both
+    singular values -- the principal magnifications, and so every
+    phosphene size -- come through untouched. Only the major axis's
+    orientation in the visual field is reflected.
+
+    So this is derived, not refitted. Fitting the mirrored volume again
+    would cost another ~90 s and ~4.2 GB to reproduce numbers that
+    follow exactly from the ones already cached.
+
+    :param jacobian_atlas: A computed or loaded `JacobianAtlas` of the
+        left LGN.
+    :param params: Parameter dictionary.
+    """
+
+    def __init__(self, jacobian_atlas: JacobianAtlas, params: Mapping):
+        super().__init__(params)
+        self.base = jacobian_atlas
+        self._ml_axis = int(require(params, 'atlas.mirror.ml_axis'))
+        self.atlas_shape = jacobian_atlas.atlas_shape
+        flip = self._reverse
+
+        # Flags and diagnostics are one scalar per voxel, so reflecting
+        # them is pure re-indexing and these stay views.
+        self.jacobian_valid = jacobian_atlas.jacobian_valid[flip]
+        self.n_neighbors = jacobian_atlas.n_neighbors[flip]
+        self.residual_rms = jacobian_atlas.residual_rms[flip]
+        self.transition_probe_residual = \
+            jacobian_atlas.transition_probe_residual[flip]
+        self.isotropic_flag = jacobian_atlas.isotropic_flag[flip]
+        self.unreliable_beyond_neighborhood_flag = \
+            jacobian_atlas.unreliable_beyond_neighborhood_flag[flip]
+
+        # Rows are visual-field (x, y); columns physical (ML, DV, AP).
+        # x and ML are the two reflected axes.
+        self._sign = np.array([[1.0, -1.0, -1.0],
+                               [-1.0, 1.0, 1.0]], dtype=np.float32)
+        self._reversed_jacobian = jacobian_atlas.jacobian[flip]
+        self._materialised = None
+
+    @property
+    def _reverse(self) -> tuple:
+        return tuple(slice(None, None, -1) if axis == self._ml_axis
+                     else slice(None)
+                     for axis in range(len(self.atlas_shape)))
+
+    def jacobian_at(self, voxel_indices: np.ndarray) -> np.ndarray:
+        idx = tuple(np.asarray(voxel_indices, dtype=int).T)
+        return self._reversed_jacobian[idx] * self._sign
+
+    @property
+    def jacobian(self) -> np.ndarray:
+        """The whole reflected field, materialised on demand.
+
+        Unlike every other array here this one cannot be a view: a sign
+        pattern is not a re-indexing. So it costs a second full-grid
+        copy (~0.5 GB on the real atlas). Nothing in the pipeline needs
+        it -- `jacobian_at` serves the per-electrode lookups and
+        `decompose_valid` is derived below. It exists so that code
+        written against `JacobianAtlas` keeps working, and it says so
+        when it runs.
+        """
+        if self._materialised is None:
+            logging.warning(
+                "Materialising the full mirrored Jacobian (%s float32, "
+                "about %.1f GB). The pipeline does not need this: "
+                "jacobian_at() and decompose_valid() both avoid it.",
+                self._reversed_jacobian.shape,
+                self._reversed_jacobian.size * 4 / 1e9)
+            self._materialised = self._reversed_jacobian * self._sign
+        return self._materialised
+
+    @jacobian.setter
+    def jacobian(self, value):
+        # JacobianAtlas.__init__ assigns None; accept that and nothing
+        # else, so no caller can quietly desynchronise the mirror from
+        # what it reflects.
+        if value is not None:
+            raise AttributeError(
+                "A MirroredJacobianAtlas derives its Jacobian from the "
+                "atlas it reflects; assign to that one instead.")
+
+    def decompose_valid(self):
+        """(major, minor, orientation) without touching `jacobian`.
+
+        The reflection is orthogonal, so the singular values are the
+        source atlas's own, re-indexed. The leading singular vector
+        picks up ``theta -> pi - theta``: the same axis, seen in a
+        mirror.
+        """
+        major, minor, orientation = self.base.singular_values
+        flip = self._reverse
+        return (major[flip], minor[flip],
+                (np.pi - orientation[flip]).astype(orientation.dtype))
+
+    def compute(self, erwin_atlas) -> 'MirroredJacobianAtlas':
+        raise NotImplementedError(
+            "A mirrored Jacobian is derived from the left LGN's cached fit, "
+            "not fitted again. Compute the left one and wrap it.")
+
+    def save(self, path):
+        raise NotImplementedError(
+            "Nothing to cache: this is a view of the left LGN's cache. Save "
+            "that one, and wrap it on load.")
 
 
 if __name__ == '__main__':  # pragma: no cover

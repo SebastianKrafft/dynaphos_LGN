@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from dynaphos_lgn.atlas import ErwinAtlas
+from dynaphos_lgn.atlas import ErwinAtlas, MirroredAtlas
 
 ATLAS_DIR = (Path(__file__).resolve().parents[2] / 'data' / 'Erwin_Atlas')
 
@@ -95,3 +95,111 @@ def test_foveal_column_sits_posteriorly(atlas):
 
     ap_size = atlas.atlas_shape[2]
     assert ap_idx.mean() < 0.25 * ap_size
+
+
+# ======================================================================
+# The mirrored right LGN, against the real data
+# ======================================================================
+# `test_bilateral.py` checks the reflection as arithmetic, on the
+# synthetic atlas. These check it against the real thing, where the
+# awkward parts actually exist: 16.9M sentinel voxels, a ~169k-voxel
+# ipsilateral placeholder at +-135 deg, and eccentricities running out
+# past 90 deg.
+
+
+@pytest.fixture(scope='module')
+def mirrored(atlas):
+    return MirroredAtlas(atlas)
+
+
+def hemifield_x(an_atlas):
+    """Horizontal visual-field coordinate of every voxel, degrees.
+
+    Positive is the right hemifield. This is what one nucleus can and
+    cannot represent, so it is the quantity the whole exercise is about.
+    """
+    return (an_atlas.eccentricity_deg
+            * np.cos(np.deg2rad(an_atlas.inclination_deg)))
+
+
+def contralateral(an_atlas):
+    """Tissue with a real retinotopic position: valid, and not the
+    coarse ipsilateral placeholder."""
+    return an_atlas.valid & ~an_atlas.is_ipsi_sentinel()
+
+
+def test_mirror_covers_the_hemifield_the_left_nucleus_cannot(atlas,
+                                                             mirrored):
+    """The point of the whole exercise, on the real atlas: one nucleus
+    reaches one hemifield, and the two together reach both."""
+    left, right = hemifield_x(atlas), hemifield_x(mirrored)
+    assert left[contralateral(atlas)].max() > 90
+    assert left[contralateral(atlas)].min() >= -1e-3
+    assert right[contralateral(mirrored)].min() < -90
+    assert right[contralateral(mirrored)].max() <= 1e-3
+
+
+def test_mirror_preserves_the_published_totals(atlas, mirrored, lgn_params):
+    """A reflection cannot create or destroy tissue. These are the same
+    quantities build.py's validation report checks against Erwin et
+    al.'s own numbers, so if the mirror passes here it passes there.
+    """
+    from dynaphos_lgn.params import resolve_class_codes
+
+    assert int(mirrored.valid.sum()) == int(atlas.valid.sum())
+    assert int(mirrored.is_ipsi_sentinel().sum()) == int(
+        atlas.is_ipsi_sentinel().sum())
+    for cell_class in ('magno', 'parvo'):
+        codes = resolve_class_codes(lgn_params, cell_class)
+        assert (float(mirrored.cells_per_voxel[np.isin(mirrored.layer,
+                                                       codes)].sum())
+                == pytest.approx(float(atlas.cells_per_voxel[
+                                           np.isin(atlas.layer,
+                                                   codes)].sum())))
+        assert (float(mirrored.eccentricity_deg[
+                          np.isin(mirrored.layer, codes)
+                          & mirrored.valid].max())
+                == pytest.approx(float(atlas.eccentricity_deg[
+                                           np.isin(atlas.layer, codes)
+                                           & atlas.valid].max())))
+
+
+def test_mirror_keeps_the_missing_data_missing(atlas, mirrored):
+    """999 means "no retinotopic position here". Reflected as if it were
+    an angle it would become -819, stop matching the sentinel, and
+    16.9M placeholder voxels would start reading as valid tissue.
+    """
+    assert int((mirrored.inclination == 999).sum()) == int(
+        (atlas.inclination == 999).sum())
+    assert int((mirrored.eccentricity == 999).sum()) == int(
+        (atlas.eccentricity == 999).sum())
+
+
+def test_ipsilateral_placeholder_still_marks_the_other_hemifield(mirrored):
+    """+-135 deg reflects to +-45 deg. Both name tissue that coarsely
+    represents the hemifield its own nucleus does not, which is why it
+    is excluded -- so the reflected values have to land on the side the
+    reflected nucleus does NOT represent.
+    """
+    assert sorted(mirrored.ipsi_sentinel_values) == [-45.0, 45.0]
+    placeholder = mirrored.is_ipsi_sentinel() & mirrored.valid
+    assert placeholder.sum() > 0
+    # Not strictly positive: a placeholder voxel at zero eccentricity
+    # sits on the fovea, which belongs to no hemifield.
+    x = hemifield_x(mirrored)[placeholder]
+    assert np.all(x >= 0)
+    assert (x > 0).mean() > 0.9
+
+
+def test_foveal_column_reflects_to_the_mirrored_indices(atlas, mirrored):
+    """A landmark that is found in the raw array rather than derived
+    from the transform under test: the foveola's projection column must
+    appear in the mirrored volume at the reflected ML index, and nowhere
+    else."""
+    foveal = get_foveal_voxels(atlas)
+    reflected = foveal.copy()
+    reflected[:, 0] = atlas.atlas_shape[0] - 1 - reflected[:, 0]
+    assert np.array_equal(
+        np.argwhere(mirrored.eccentricity == 0)[np.lexsort(
+            np.argwhere(mirrored.eccentricity == 0).T[::-1])],
+        reflected[np.lexsort(reflected.T[::-1])])

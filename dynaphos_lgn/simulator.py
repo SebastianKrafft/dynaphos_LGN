@@ -155,6 +155,20 @@ class LGNPhospheneSimulator:
     # ------------------------------------------------------------------
     # Setup
     # ------------------------------------------------------------------
+    @property
+    def electrode_dimension(self) -> int:
+        """Which tensor dimension numbers the electrodes.
+
+        0 without batching, 1 with. Public because
+        `dynaphos_lgn.bilateral` has to split and concatenate along it.
+        """
+        return self._electrode_dimension
+
+    @property
+    def hemisphere(self) -> str:
+        """Which nucleus this simulator stimulates."""
+        return self.array.hemisphere
+
     def _warn_about_out_of_view_electrodes(self):
         """
         Say so when electrodes sit outside the rendered field of view.

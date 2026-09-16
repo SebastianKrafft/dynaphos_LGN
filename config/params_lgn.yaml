@@ -54,6 +54,26 @@ atlas:
   voxel_size_mm: 0.025
   file_order: F
 
+  # Which nuclei to simulate, and so which half of the visual field
+  # each covers. The published atlas is a single LEFT LGN, which
+  # represents the RIGHT hemifield -- with [left] alone the left half of
+  # every rendered frame stays empty, as it did before this key existed.
+  #
+  # 'right' is not a second dataset. It is that same volume reflected
+  # across the midsagittal plane: ML axis reversed, inclination sent to
+  # 180 - I. The assumption is that the two nuclei are mirror images,
+  # which is the textbook first approximation and no more -- real left
+  # and right LGNs differ in volume and cell count, and no second
+  # reconstructed atlas exists to say by how much. Anything built on it
+  # is tagged hemisphere: right all the way to the output.
+  #
+  # Widen run.view_angle when turning this on, or half the electrodes
+  # will sit outside the rendered frame (the simulator warns).
+  hemispheres: [left]           # [left] | [right] | [left, right]
+  mirror:
+    ml_axis: 0                  # index of ML in shape_ml_dv_ap; the
+                                # reflection axis
+
   # Per-file dtype and scale. `scale` divides the stored integer to give
   # the physical value: ECC.DAT holds degrees x10, CELLS.DAT holds
   # cells/voxel x1000, INCL.DAT holds plain integer degrees.
@@ -177,7 +197,16 @@ synthetic_atlas:
 # Electrode array
 # ----------------------------------------------------------------------
 electrodes:
-  n_electrodes: 64
+  n_electrodes: 64              # PER NUCLEUS, not in total: each
+                                # hemisphere gets its own array, so a
+                                # bilateral run of this config places 64
+                                # on each side.
+  # Per-hemisphere override, for an implant that is not symmetric. null
+  # means "use n_electrodes above"; a number replaces it for that
+  # nucleus only.
+  n_electrodes_by_hemisphere:
+    left: null
+    right: null
   cell_class: null              # null | parvo | magno
   min_eccentricity_deg: 0.0
   max_eccentricity_deg: 20.0

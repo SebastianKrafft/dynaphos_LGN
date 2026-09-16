@@ -19,6 +19,11 @@ published totals. Expect a few minutes, several GB of peak RAM and a
 ~110 MB cache. The report matters as much as the cache: a silently
 mis-read atlas shows up there as a wrong total rather than as plausible
 nonsense downstream.
+
+There is one cache however many nuclei you simulate. The right LGN is
+the left one reflected, and reflecting a Jacobian is re-indexing plus a
+sign pattern -- so it is derived from this cache at build time rather
+than fitted again.
 """
 from __future__ import annotations
 
@@ -26,18 +31,21 @@ import argparse
 import logging
 import time
 from pathlib import Path
-from typing import Mapping, Optional, Tuple, Union
+from typing import Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
 from dynaphos.utils import load_params
-from dynaphos_lgn.atlas import ErwinAtlas, JacobianAtlas
+from dynaphos_lgn.atlas import (ErwinAtlas, JacobianAtlas, MirroredAtlas,
+                                MirroredJacobianAtlas)
+from dynaphos_lgn.bilateral import (BilateralLGNSimulator,
+                                    split_targets_by_hemifield)
 from dynaphos_lgn.current_spread import RecruitmentKernel
 from dynaphos_lgn.electrodes import LGNElectrodeArray
 from dynaphos_lgn.magnification import (AtlasGradientMagnification,
                                         JacobianMagnification,
                                         MalpeliDensityMagnification)
-from dynaphos_lgn.params import require, resolve_class_codes
+from dynaphos_lgn.params import optional, require, resolve_class_codes
 from dynaphos_lgn.simulator import LGNPhospheneSimulator
 
 
@@ -156,6 +164,76 @@ def build_jacobian(params: dict, atlas, cache_dir=None,
     return jac
 
 
+# ======================================================================
+# Hemispheres
+# ======================================================================
+# The published atlas is one LEFT LGN, which represents the RIGHT
+# hemifield. The right nucleus is that same volume reflected, not a
+# second dataset -- `dynaphos_lgn.atlas.MirroredAtlas` says what that
+# assumes. Both nuclei share the left one's atlas load and its cached
+# Jacobian fit; reflecting is re-indexing, and refitting would spend
+# another ~90 s and ~4.2 GB reproducing numbers that follow exactly.
+
+
+def configured_hemispheres(params: Mapping) -> list:
+    """The nuclei `atlas.hemispheres` asks for, validated and ordered.
+
+    Left first when both are present, so electrode numbering is
+    predictable.
+    """
+    names = require(params, 'atlas.hemispheres')
+    if isinstance(names, str):
+        names = [names]
+    names = list(names)
+    if not names:
+        raise ValueError("atlas.hemispheres is empty; it must list at least "
+                         "one of 'left', 'right'.")
+    unknown = [n for n in names if n not in ('left', 'right')]
+    if unknown:
+        raise ValueError(f"Unknown hemisphere(s) {unknown} in "
+                         f"atlas.hemispheres; expected 'left' and/or "
+                         f"'right'.")
+    if len(set(names)) != len(names):
+        raise ValueError(f"atlas.hemispheres lists a nucleus twice: {names}.")
+    return sorted(names, key=lambda n: 0 if n == 'left' else 1)
+
+
+def n_electrodes_for(params: Mapping, hemisphere: str) -> int:
+    """How many electrodes go in one nucleus.
+
+    `electrodes.n_electrodes` is the per-nucleus count;
+    `electrodes.n_electrodes_by_hemisphere` overrides it for one side,
+    for an implant that is not symmetric. A null there means "use the
+    shared value", which is why this reads through `optional`.
+    """
+    override = optional(
+        params, f'electrodes.n_electrodes_by_hemisphere.{hemisphere}')
+    if override is not None:
+        return int(override)
+    return int(require(params, 'electrodes.n_electrodes'))
+
+
+def build_hemisphere_atlas(params: Mapping, atlas, hemisphere: str):
+    """The left atlas as loaded, or its mirror image for the right."""
+    if hemisphere == 'left':
+        return atlas
+    if hemisphere == 'right':
+        return MirroredAtlas(atlas, params)
+    raise ValueError(f"Unknown hemisphere {hemisphere!r}; expected 'left' "
+                     f"or 'right'.")
+
+
+def build_hemisphere_jacobian(params: Mapping, jacobian_atlas,
+                              hemisphere: str):
+    """The cached fit, or the reflection of it. Never a second fit."""
+    if hemisphere == 'left':
+        return jacobian_atlas
+    if hemisphere == 'right':
+        return MirroredJacobianAtlas(jacobian_atlas, params)
+    raise ValueError(f"Unknown hemisphere {hemisphere!r}; expected 'left' "
+                     f"or 'right'.")
+
+
 def build_kernel(params: dict) -> RecruitmentKernel:
     """The recruitment kernel the config describes."""
     return RecruitmentKernel.from_params(params)
@@ -180,7 +258,9 @@ def build_electrode_array(params: dict, atlas, jacobian_atlas,
                           kernel: RecruitmentKernel,
                           rng: Optional[np.random.Generator] = None,
                           voxel_indices: Optional[np.ndarray] = None,
-                          visual_field_targets=None) -> LGNElectrodeArray:
+                          visual_field_targets=None,
+                          n_electrodes: Optional[int] = None
+                          ) -> LGNElectrodeArray:
     # Everything else (I_max, tail weight, budgets, scatter points, cell
     # class, sentinel handling) is read from the config by
     # LGNElectrodeArray itself, so there is exactly one place each value
@@ -195,38 +275,119 @@ def build_electrode_array(params: dict, atlas, jacobian_atlas,
         return LGNElectrodeArray.from_visual_field_targets(
             atlas, params, ecc, incl, **common)
     return LGNElectrodeArray.spread_in_visual_field(
-        atlas, params, rng=rng, **common)
+        atlas, params, rng=rng, n_electrodes=n_electrodes, **common)
 
 
 def build_simulator(params: dict, atlas_dir=None, synthetic: bool = False,
                     rng: Optional[np.random.Generator] = None,
                     voxel_indices: Optional[np.ndarray] = None,
                     visual_field_targets=None,
-                    recompute_jacobian: bool = False
-                    ) -> Tuple[LGNPhospheneSimulator, dict]:
+                    recompute_jacobian: bool = False,
+                    hemispheres: Optional[Sequence[str]] = None
+                    ) -> Tuple[Union[LGNPhospheneSimulator,
+                                     BilateralLGNSimulator], dict]:
     """Assemble a simulator from a parameter dict.
 
-    :return: (simulator, parts), where `parts` holds the atlas, Jacobian
-        atlas, kernel, magnification model and electrode array, so they
-        can be inspected or swapped without a full rebuild.
+    How much of the visual field it covers is `atlas.hemispheres`'s
+    decision. One nucleus gives one hemifield and an
+    `LGNPhospheneSimulator`, exactly as before this key existed; both
+    give the whole field and a `BilateralLGNSimulator` that sums them.
+
+    :param hemispheres: Override `atlas.hemispheres` for this build.
+    :param voxel_indices: Explicit electrode voxels. With two nuclei the
+        indices are per-nucleus and so ambiguous on their own -- pass
+        ``{'left': ..., 'right': ...}`` instead.
+    :param visual_field_targets: ``(eccentricity, inclination)`` percept
+        locations. With two nuclei each target is routed to the nucleus
+        whose hemifield it falls in.
+    :return: (simulator, parts). For one hemisphere `parts` holds the
+        atlas, Jacobian atlas, kernel, magnification model and electrode
+        array as it always has. For two it holds the shared `kernel` and
+        a `hemispheres` dict of that same set per nucleus, plus
+        `simulators`.
     """
     rng = (np.random.default_rng(require(params, 'run.seed'))
            if rng is None else rng)
+    names = (configured_hemispheres(params) if hemispheres is None
+             else configured_hemispheres({'atlas': {
+                 'hemispheres': list(hemispheres)}}))
 
     atlas = build_atlas(params, atlas_dir, synthetic)
     cache_dir = (None if getattr(atlas, 'is_synthetic', False)
                  else Path(atlas_dir or require(params, 'atlas.directory')))
     jacobian = build_jacobian(params, atlas, cache_dir, recompute_jacobian)
     kernel = build_kernel(params)
-    magnification = build_magnification_model(params, atlas, jacobian)
-    array = build_electrode_array(params, atlas, jacobian, kernel, rng,
-                                  voxel_indices, visual_field_targets)
-    array.magnification_model = magnification
 
-    simulator = LGNPhospheneSimulator(params, array, rng=rng)
-    return simulator, {'atlas': atlas, 'jacobian_atlas': jacobian,
-                       'kernel': kernel, 'magnification': magnification,
-                       'electrode_array': array}
+    voxels_by_hemisphere = _voxel_indices_by_hemisphere(voxel_indices, names)
+    targets_by_hemisphere = _targets_by_hemisphere(visual_field_targets,
+                                                   names)
+    # One child generator per nucleus, drawn from the caller's, so the
+    # two arrays are independent draws rather than exact reflections of
+    # each other -- and still reproducible from `run.seed`.
+    generators = ([rng] if len(names) == 1
+                  else [np.random.default_rng(int(seed)) for seed
+                        in rng.integers(0, 2 ** 62, len(names))])
+
+    parts = {'kernel': kernel, 'hemispheres': {}}
+    simulators = {}
+    for name, hemisphere_rng in zip(names, generators):
+        hemisphere_atlas = build_hemisphere_atlas(params, atlas, name)
+        hemisphere_jacobian = build_hemisphere_jacobian(params, jacobian,
+                                                        name)
+        magnification = build_magnification_model(
+            params, hemisphere_atlas, hemisphere_jacobian)
+        array = build_electrode_array(
+            params, hemisphere_atlas, hemisphere_jacobian, kernel,
+            hemisphere_rng, voxels_by_hemisphere[name],
+            targets_by_hemisphere[name], n_electrodes_for(params, name))
+        array.magnification_model = magnification
+        simulators[name] = LGNPhospheneSimulator(params, array,
+                                                 rng=hemisphere_rng)
+        parts['hemispheres'][name] = {
+            'atlas': hemisphere_atlas,
+            'jacobian_atlas': hemisphere_jacobian,
+            'kernel': kernel,
+            'magnification': magnification,
+            'electrode_array': array,
+            'simulator': simulators[name]}
+
+    if len(names) == 1:
+        only = parts['hemispheres'][names[0]]
+        return simulators[names[0]], {k: v for k, v in only.items()
+                                      if k != 'simulator'}
+
+    parts['simulators'] = simulators
+    return BilateralLGNSimulator(simulators, params), parts
+
+
+def _voxel_indices_by_hemisphere(voxel_indices, names: Sequence[str]) -> dict:
+    """Resolve the `voxel_indices` argument to one entry per nucleus."""
+    if voxel_indices is None:
+        return {name: None for name in names}
+    if isinstance(voxel_indices, Mapping):
+        missing = [name for name in names if name not in voxel_indices]
+        if missing:
+            raise ValueError(
+                f"voxel_indices has no entry for {missing}; it must name "
+                f"every hemisphere being built ({list(names)}).")
+        return {name: np.asarray(voxel_indices[name]) for name in names}
+    if len(names) > 1:
+        raise ValueError(
+            f"voxel_indices are indices into ONE nucleus's grid, so a plain "
+            f"array is ambiguous when building {list(names)}. Pass "
+            f"{{'left': ..., 'right': ...}}, or build one hemisphere at a "
+            f"time with hemispheres=.")
+    return {names[0]: np.asarray(voxel_indices)}
+
+
+def _targets_by_hemisphere(visual_field_targets, names: Sequence[str]) -> dict:
+    """Route requested percept locations to the nucleus that can reach."""
+    if visual_field_targets is None:
+        return {name: None for name in names}
+    if len(names) == 1:
+        return {names[0]: visual_field_targets}
+    eccentricity, inclination = visual_field_targets
+    return split_targets_by_hemifield(eccentricity, inclination, names)
 
 
 # ======================================================================
@@ -477,7 +638,9 @@ def main(argv=None) -> int:
             "The 4 GB is the part to watch -- it is nearly all full-grid\n"
             "float32 arrays, so there is no way to trade time for memory\n"
             "here. Close other things first if RAM is tight.\n\n"
-            "Everything downstream loads the cache instead of recomputing."))
+            "Everything downstream loads the cache instead of recomputing.\n"
+            "One cache covers both nuclei: the right LGN is derived from\n"
+            "this fit by reflection, never refitted."))
     parser.add_argument('--params', default=None,
                         help='params_lgn.yaml (default: config/ beside the '
                              'repo root)')
