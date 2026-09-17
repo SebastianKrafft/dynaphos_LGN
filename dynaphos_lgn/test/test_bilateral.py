@@ -165,6 +165,29 @@ class TestMirroredAtlas:
         assert right[0] == n_ml - 1 - left[0]
         assert right[1:] == left[1:]
 
+    def test_index_to_mm_inverts_the_lookup_in_both_nuclei(
+            self, mirrored_atlas, synthetic_atlas):
+        """Multiplying an index by the voxel size and adding the origin
+        is the obvious inverse and it is wrong for the right nucleus --
+        it mirrors it back onto the left one. The atlas's own inverse
+        has to round-trip in both."""
+        voxels = np.argwhere(synthetic_atlas.valid)[::1701]
+        for atlas in (synthetic_atlas, mirrored_atlas):
+            mm = atlas.index_to_horsley_clarke(*voxels.T)
+            back = np.stack(atlas.horsley_clarke_to_index(*mm), axis=-1)
+            assert np.array_equal(back, voxels)
+
+    def test_index_to_mm_puts_the_two_nuclei_in_different_places(
+            self, mirrored_atlas, synthetic_atlas):
+        """The naive inverse would give both nuclei identical
+        coordinates, which is exactly the bug this method exists to stop.
+        """
+        voxel = np.argwhere(synthetic_atlas.valid)[0]
+        left = synthetic_atlas.index_to_horsley_clarke(*voxel)
+        right = mirrored_atlas.index_to_horsley_clarke(*voxel)
+        assert left[0] != right[0]
+        assert left[1:] == right[1:]
+
     def test_a_coordinate_meant_for_the_other_nucleus_fails_loudly(
             self, mirrored_atlas, synthetic_atlas):
         with pytest.raises(ValueError, match='right LGN'):
@@ -582,6 +605,37 @@ class TestBilateralForwardPass:
         image = np.ones((res_y, res_x), dtype=np.float32)
         amplitudes = simulator.sample_stimulus(image)
         assert amplitudes.shape[-1] == simulator.num_phosphenes
+
+    def test_visual_field_spans_both_hemifields(self, bilateral):
+        """One `Map` over both nuclei, with inclination now using its
+        whole range rather than just (-90, 90) deg."""
+        simulator, _ = bilateral
+        x, y = simulator.visual_field.cartesian
+        assert len(x) == simulator.num_phosphenes
+        assert np.allclose(np.stack([x, y], axis=-1), simulator.vf_xy,
+                           atol=1e-6)
+        assert x.min() < 0 < x.max()
+
+    def test_phosphene_sizes_are_reported_over_both_nuclei(self, bilateral):
+        simulator, _ = bilateral
+        major, minor = simulator.phosphene_sigma_deg(100.0)
+        assert major.shape == (simulator.num_phosphenes,)
+        assert np.all(major[np.isfinite(major)]
+                      >= minor[np.isfinite(major)] - 1e-9)
+        for name, sub in simulator.simulators.items():
+            span = simulator.electrode_slices[name]
+            assert np.allclose(major[span],
+                               sub.array.phosphene_sigma_deg(100.0)[0],
+                               equal_nan=True)
+
+    def test_shape_broadcasts_against_the_reported_state(self, bilateral):
+        """`shape` exists so an optimisation target can be built against
+        it, which only helps if it matches what get_state returns."""
+        simulator, _ = bilateral
+        simulator.reset()
+        simulator(self._amplitude(simulator))
+        target = torch.full(simulator.shape, 0.5)
+        assert target.shape == simulator.get_state()['brightness'].shape
 
     def test_describe_says_what_the_right_half_is(self, bilateral):
         text = bilateral[0].describe()

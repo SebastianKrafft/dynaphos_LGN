@@ -35,7 +35,7 @@ from typing import Dict, List, Mapping, Optional, Sequence
 import numpy as np
 import torch
 
-from dynaphos.utils import to_numpy
+from dynaphos.utils import Map, to_numpy
 from dynaphos_lgn.simulator import LGNPhospheneSimulator
 
 
@@ -110,6 +110,41 @@ class BilateralLGNSimulator:
     def out_of_view(self) -> np.ndarray:
         return np.concatenate([sim.out_of_view
                                for sim in self.simulators.values()])
+
+    @property
+    def visual_field(self) -> Map:
+        """Every phosphene's position, as one polar `Map`.
+
+        The same thing `LGNElectrodeArray.visual_field` is for a single
+        nucleus, over both. Note that inclination now uses its whole
+        range: one nucleus spans (-90, 90) deg, the other the rest.
+        """
+        return Map(r=self.eccentricity_deg,
+                   phi=np.deg2rad(self.inclination_deg))
+
+    @property
+    def shape(self) -> tuple:
+        """The per-electrode tensor shape, over both nuclei.
+
+        The sub-simulators' own shape with the electrode dimension
+        widened to hold all of them, so a target built against this
+        broadcasts against what `get_state` returns.
+        """
+        first = self.simulators[self.hemispheres[0]].shape
+        return (first[:self.electrode_dimension] + (self.num_phosphenes,)
+                + first[self.electrode_dimension + 1:])
+
+    def phosphene_sigma_deg(self, current_ua):
+        """(major, minor) phosphene sigmas in degrees, both nuclei.
+
+        A reflection leaves both principal magnifications untouched, so
+        the right nucleus's sizes are its mirror-image voxels' own --
+        nothing about the size model changes between the two.
+        """
+        pairs = [sim.array.phosphene_sigma_deg(current_ua)
+                 for sim in self.simulators.values()]
+        return (np.concatenate([major for major, _ in pairs]),
+                np.concatenate([minor for _, minor in pairs]))
 
     # ------------------------------------------------------------------
     # Splitting and joining

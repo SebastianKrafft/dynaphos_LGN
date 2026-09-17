@@ -202,8 +202,41 @@ class ErwinAtlas(Atlas):
             return int(ml_idx), int(dv_idx), int(ap_idx)
         return ml_idx, dv_idx, ap_idx
 
+    def index_to_horsley_clarke(self, ml_idx, dv_idx, ap_idx) -> tuple:
+        """The exact inverse of `horsley_clarke_to_index`.
+
+        Index -> stereotaxic millimetres, so a voxel found in the array
+        can be drawn in the coordinates an electrode is specified in.
+        Hemisphere-correct: `MirroredAtlas` reflects the ML axis, and
+        that reflection is its own inverse, so the same one line serves
+        both nuclei. Multiplying an index by the voxel size and adding
+        the origin does NOT, and silently mirrors the right nucleus back
+        onto the left one.
+
+        :param ml_idx: Medial-lateral index or indices.
+        :param dv_idx: Dorsal-ventral index or indices.
+        :param ap_idx: Anterior-posterior index or indices.
+        :return: (ml_mm, dv_mm, ap_mm), floats for scalar input and
+            float arrays otherwise. `ml_mm` is lateral distance from the
+            midline, positive in both nuclei.
+        """
+        def to_mm(index, origin):
+            return np.asarray(index) * self._voxel_size_mm + origin
+
+        ml_mm = to_mm(self._ml_index(np.asarray(ml_idx)), self._origin_ml_mm)
+        dv_mm = to_mm(dv_idx, self._origin_dv_mm)
+        ap_mm = to_mm(ap_idx, self._origin_ap_mm)
+        if ml_mm.ndim == 0:
+            return float(ml_mm), float(dv_mm), float(ap_mm)
+        return ml_mm, dv_mm, ap_mm
+
     def _ml_index(self, index: np.ndarray) -> np.ndarray:
-        """Hook for `MirroredAtlas`, whose ML axis runs the other way."""
+        """Hook for `MirroredAtlas`, whose ML axis runs the other way.
+
+        An involution -- applying it twice is the identity -- which is
+        what lets `index_to_horsley_clarke` invert the lookup with the
+        same call.
+        """
         return index
 
 
