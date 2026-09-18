@@ -293,7 +293,7 @@ recruitment:
 # ----------------------------------------------------------------------
 magnification:
   model: jacobian               # jacobian | atlas_gradient |
-                                # malpeli_density
+                                # anisotropic_gradient | malpeli_density
 
   # Malpeli, Lee & Baker (1996), J Comp Neurol 375:363-377, Eqs 1-2.
   # Verified full text. These are CELL DENSITY (cells/deg^2), not a
@@ -356,6 +356,34 @@ magnification:
     thickness_plausibility_bracket_mm: [0.05, 50.0]
 
   eccentricity_table_bin_width_deg: 1.0
+
+  # AnisotropicGradientMagnification: a 2-D (eccentricity, inclination)
+  # lookup table built once from the Jacobian atlas, so simulation never
+  # touches the per-voxel Jacobian. The bin widths are NOT free to widen
+  # casually: the real atlas has a narrow discontinuity around
+  # inclination ~-15 deg (present past ~20 deg eccentricity, well inside
+  # the parvocellular layers -- see AnisotropicGradientMagnification's
+  # docstring) that is only ~5-10 deg wide. Widening
+  # inclination_bin_width_deg much past this risks a bin straddling it
+  # and averaging torn tissue into a clean estimate; narrowing it
+  # further mainly costs more (and sparser) bins for no benefit, since
+  # min_voxels_per_bin will just flag them unreliable instead.
+  anisotropic_gradient:
+    eccentricity_bin_width_deg: 2.0
+    inclination_bin_width_deg: 2.0
+    # Bins with fewer fit-ok voxels than this are flagged unreliable
+    # regardless of their value -- catches the sparse, noisy bins at the
+    # edge of the nucleus (max eccentricity, |inclination| -> 90 deg).
+    min_voxels_per_bin: 20
+    # A bin is flagged unreliable if its median (major or minor) sits
+    # more than this many robust-sigmas (MAD-based) from its own
+    # eccentricity row's median. This is what actually catches the
+    # inclination seam once the grid is fine enough to isolate it.
+    outlier_z_threshold: 4.0
+    # Below this anisotropy (major/minor), the principal axis is close
+    # enough to arbitrary that the SVD's orientation is noise, not
+    # signal -- those bins store orientation=0 instead.
+    orientation_reliable_min_anisotropy: 1.05
 
 # ----------------------------------------------------------------------
 # Receptive fields

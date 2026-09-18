@@ -42,7 +42,8 @@ from dynaphos_lgn.bilateral import (BilateralLGNSimulator,
                                     split_targets_by_hemifield)
 from dynaphos_lgn.current_spread import RecruitmentKernel
 from dynaphos_lgn.electrodes import LGNElectrodeArray
-from dynaphos_lgn.magnification import (AtlasGradientMagnification,
+from dynaphos_lgn.magnification import (AnisotropicGradientMagnification,
+                                        AtlasGradientMagnification,
                                         JacobianMagnification,
                                         MalpeliDensityMagnification)
 from dynaphos_lgn.params import optional, require, resolve_class_codes
@@ -247,11 +248,14 @@ def build_magnification_model(params: dict, atlas, jacobian_atlas):
     if choice == 'atlas_gradient':
         return AtlasGradientMagnification.from_jacobian(
             JacobianMagnification(jacobian_atlas, params, atlas))
+    if choice == 'anisotropic_gradient':
+        return AnisotropicGradientMagnification.from_jacobian(
+            JacobianMagnification(jacobian_atlas, params, atlas))
     if choice == 'malpeli_density':
         return MalpeliDensityMagnification.from_atlas(atlas, params)
     raise ValueError(
         f"Unknown magnification.model {choice!r}; expected 'jacobian', "
-        f"'atlas_gradient' or 'malpeli_density'.")
+        f"'atlas_gradient', 'anisotropic_gradient' or 'malpeli_density'.")
 
 
 def build_electrode_array(params: dict, atlas, jacobian_atlas,

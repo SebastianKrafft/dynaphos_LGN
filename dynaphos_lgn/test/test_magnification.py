@@ -290,6 +290,141 @@ class TestAtlasGradient:
         assert np.all(local.isotropic_by_construction)
 
 
+class TestBinReliability:
+    """`_bin_reliability` in isolation, with hand-built grids -- this is
+    the mechanism that is supposed to catch the real atlas's inclination
+    seam once the table is fine enough to isolate it to a few bins."""
+
+    def test_flags_low_count_bins(self):
+        value_grid = np.full((2, 5), 10.0)
+        n_grid = np.full((2, 5), 100.0)
+        n_grid[0, 2] = 1.0
+        reliable = mg._bin_reliability(value_grid, n_grid,
+                                       min_voxels_per_bin=20,
+                                       outlier_z_threshold=4.0)
+        assert not reliable[0, 2]
+        assert reliable.sum() == reliable.size - 1
+
+    def test_flags_a_row_outlier(self):
+        """A single bin far from its row's typical value -- the tear
+        signature -- gets flagged even though it has plenty of voxels."""
+        value_grid = np.full((1, 9), 10.0)
+        value_grid[0, 4] = 100.0
+        n_grid = np.full((1, 9), 100.0)
+        reliable = mg._bin_reliability(value_grid, n_grid,
+                                       min_voxels_per_bin=20,
+                                       outlier_z_threshold=4.0)
+        assert not reliable[0, 4]
+        assert reliable[0].sum() == 8
+
+    def test_does_not_flag_a_smooth_row(self):
+        value_grid = np.linspace(1.0, 20.0, 10).reshape(1, 10)
+        n_grid = np.full((1, 10), 100.0)
+        reliable = mg._bin_reliability(value_grid, n_grid,
+                                       min_voxels_per_bin=20,
+                                       outlier_z_threshold=4.0)
+        assert np.all(reliable)
+
+
+class TestAnisotropicGradient:
+    @pytest.fixture
+    def model(self, synthetic_atlas, synthetic_jacobian, lgn_params):
+        jm = mg.JacobianMagnification(synthetic_jacobian, lgn_params,
+                                      synthetic_atlas)
+        return mg.AnisotropicGradientMagnification.from_jacobian(
+            jm, params=lgn_params)
+
+    def test_requires_inclination(self, model):
+        with pytest.raises(ValueError, match='inclination_deg'):
+            model.at_eccentricity(np.array([15.0]))
+
+    def test_recovers_the_analytic_magnifications(self, model,
+                                                   synthetic_atlas):
+        ecc = 15.0
+        local = model.at_eccentricity(np.array([ecc]),
+                                      inclination_deg=np.array([0.0]))
+        fitted = np.sort([local.major_deg_per_mm[0], local.minor_deg_per_mm[0]])
+        analytic = np.sort(np.asarray(
+            synthetic_atlas.analytic_magnification_deg_per_mm(ecc),
+            dtype=float))
+        # Looser than the per-voxel Jacobian check: the table adds
+        # spatial binning on top of the per-voxel fit's own noise.
+        assert np.allclose(fitted, analytic, rtol=0.35)
+
+    def test_central_bins_are_isotropic_by_construction(self, model):
+        """Inside `atlas.isotropic_construction_radius_deg`, Erwin et
+        al. assigned eccentricity from an isotropic formula -- any
+        anisotropy the fit reports there is an artefact of that
+        construction, so orientation must read as the flagged zero, not
+        as a measurement."""
+        local = model.at_eccentricity(np.array([0.3]),
+                                      inclination_deg=np.array([5.0]))
+        assert local.isotropic_by_construction[0]
+        assert local.orientation_rad[0] == 0.0
+
+    def test_anisotropic_beyond_the_central_radius(self, model):
+        """A sanity check that the table is not isotropic everywhere --
+        otherwise `test_central_bins_are_isotropic_by_construction` would
+        pass vacuously."""
+        local = model.at_eccentricity(np.array([15.0]),
+                                      inclination_deg=np.array([0.0]))
+        assert not local.isotropic_by_construction[0]
+        assert local.anisotropy[0] > 1.05
+
+    def test_at_voxels_matches_at_eccentricity(self, model, synthetic_atlas):
+        idx = np.argwhere(synthetic_atlas.valid)
+        sample = idx[np.linspace(0, len(idx) - 1, 20, dtype=int)]
+        sel = tuple(sample.T)
+        from_voxels = model.at_voxels(sample, erwin_atlas=synthetic_atlas)
+        from_ecc = model.at_eccentricity(
+            synthetic_atlas.eccentricity_deg[sel],
+            inclination_deg=synthetic_atlas.inclination_deg[sel])
+        assert np.allclose(from_voxels.major_deg_per_mm,
+                           from_ecc.major_deg_per_mm, equal_nan=True)
+
+    def test_unreliable_bin_does_not_leak_into_its_neighbours(self):
+        """The whole point of a fine grid: an isolated bad bin (standing
+        in for the real atlas's inclination seam) must not drag a
+        neighbouring query's value toward it, even though bilinear
+        interpolation would ordinarily blend across the shared edge."""
+        ecc_edges = np.array([0., 10., 20., 30.])
+        incl_edges = np.array([-20., -10., 0., 10., 20.])
+        major_grid = np.full((3, 4), 10.0)
+        minor_grid = np.full((3, 4), 5.0)
+        minor_grid[1, 1] = 0.5  # the "torn" bin: ecc in [10,20), incl in [-10,0)
+        orientation_grid = np.zeros((3, 4))
+        n_grid = np.full((3, 4), 100.0)
+        reliable_grid = np.ones((3, 4), dtype=bool)
+        reliable_grid[1, 1] = False
+        isotropic_grid = np.ones((3, 4), dtype=bool)
+
+        model = mg.AnisotropicGradientMagnification(
+            ecc_edges, incl_edges, major_grid, minor_grid, orientation_grid,
+            n_grid, reliable_grid, isotropic_grid,
+            orientation_reliable_min_anisotropy=1.0)
+
+        # Deep inside the bad bin: routed to the nearest reliable bin
+        # instead of returning the corrupted 0.5, and flagged.
+        at_bad = model.at_eccentricity(np.array([15.0]),
+                                       inclination_deg=np.array([-5.0]))
+        assert at_bad.minor_deg_per_mm[0] == pytest.approx(5.0)
+        assert at_bad.unreliable_beyond_neighborhood[0]
+
+        # Straddling the bad bin's edge: bilinear would ordinarily blend
+        # 0.5 into the result, but the corrupted corner must be dropped
+        # and the remaining weight renormalised over the clean one(s).
+        at_edge = model.at_eccentricity(np.array([15.0]),
+                                        inclination_deg=np.array([0.0]))
+        assert at_edge.minor_deg_per_mm[0] == pytest.approx(5.0, rel=1e-6)
+        assert at_edge.unreliable_beyond_neighborhood[0]
+
+        # Far from the bad bin: clean bilinear, not flagged.
+        far = model.at_eccentricity(np.array([5.0]),
+                                    inclination_deg=np.array([15.0]))
+        assert far.minor_deg_per_mm[0] == pytest.approx(5.0)
+        assert not far.unreliable_beyond_neighborhood[0]
+
+
 @requires_real_atlas
 class TestRealAtlasCellDistribution:
     """Properties of the real atlas that the density route depends on.

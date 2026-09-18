@@ -405,7 +405,8 @@ class LGNElectrodeArray:
             missing = ~local.valid | ~np.isfinite(local.major_deg_per_mm)
         elif magnification_model is not None:
             self.magnification_model = magnification_model
-            local = magnification_model.at_eccentricity(self.eccentricity_deg)
+            local = magnification_model.at_eccentricity(
+                self.eccentricity_deg, inclination_deg=self.inclination_deg)
             missing = ~local.valid
             scalar_fallback[:] = True
         else:
@@ -416,7 +417,7 @@ class LGNElectrodeArray:
             # Fill Jacobian gaps from the scalar model rather than
             # dropping the electrode entirely.
             fallback = magnification_model.at_eccentricity(
-                self.eccentricity_deg)
+                self.eccentricity_deg, inclination_deg=self.inclination_deg)
             for attr in ('major_deg_per_mm', 'minor_deg_per_mm',
                          'orientation_rad'):
                 setattr(local, attr,

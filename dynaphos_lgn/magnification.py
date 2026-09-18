@@ -166,7 +166,13 @@ class MagnificationModel:
         raise NotImplementedError
 
     def at_eccentricity(self, eccentricity_deg: ArrayLike,
-                        cell_class: str = 'parvo') -> LocalMagnification:
+                        cell_class: str = 'parvo',
+                        inclination_deg: Optional[ArrayLike] = None
+                        ) -> LocalMagnification:
+        """:param inclination_deg: Needed by models whose magnification
+            depends on visual-field position, not eccentricity alone
+            (`AnisotropicGradientMagnification`). Isotropic models accept
+            and ignore it, so callers can pass it uniformly."""
         raise NotImplementedError
 
 
@@ -241,13 +247,19 @@ class JacobianMagnification(MagnificationModel):
             valid=valid)
 
     def at_eccentricity(self, eccentricity_deg: ArrayLike,
-                        cell_class: str = 'parvo') -> LocalMagnification:
+                        cell_class: str = 'parvo',
+                        inclination_deg: Optional[ArrayLike] = None
+                        ) -> LocalMagnification:
         """Inclination-averaged magnification at the given eccentricities,
         binned at `magnification.eccentricity_table_bin_width_deg`.
 
         Requires `erwin_atlas`. Averaging over inclination discards the
         anisotropy the Jacobian exists to capture, so this is for
         validation against literature curves, not for rendering.
+
+        :param inclination_deg: Accepted and ignored -- this model is
+            isotropic by construction. Present only so callers can pass
+            it uniformly across `MagnificationModel` implementations.
         """
         if self.erwin_atlas is None:
             raise ValueError("at_eccentricity needs the ErwinAtlas "
@@ -340,7 +352,11 @@ class AtlasGradientMagnification(MagnificationModel):
         return cls(centers, mm_per_deg)
 
     def at_eccentricity(self, eccentricity_deg: ArrayLike,
-                        cell_class: str = 'parvo') -> LocalMagnification:
+                        cell_class: str = 'parvo',
+                        inclination_deg: Optional[ArrayLike] = None
+                        ) -> LocalMagnification:
+        """:param inclination_deg: Accepted and ignored -- this model is
+            isotropic by construction."""
         e = np.atleast_1d(np.asarray(eccentricity_deg, dtype=float))
         mm_per_deg = np.interp(e, self.bin_centers_deg, self.mm_per_deg)
         deg_per_mm = 1.0 / mm_per_deg
@@ -360,6 +376,371 @@ class AtlasGradientMagnification(MagnificationModel):
                              "eccentricities.")
         idx = tuple(np.asarray(voxel_indices, dtype=int).T)
         return self.at_eccentricity(erwin_atlas.eccentricity_deg[idx])
+
+
+def _bin_reliability(value_grid: np.ndarray, n_grid: np.ndarray,
+                     min_voxels_per_bin: int, outlier_z_threshold: float
+                     ) -> np.ndarray:
+    """Per-bin reliability: enough voxels, and not a robust outlier
+    against its own eccentricity row.
+
+    The row (fixed eccentricity, varying inclination) is the right
+    comparison set: magnification changes smoothly along it except at
+    one place, so a bin whose median sits many robust-sigmas from the
+    row's typical value is flagged rather than trusted -- exactly the
+    signature the Erwin atlas's inclination seam leaves once the grid is
+    fine enough to isolate it to a few bins instead of averaging it into
+    its neighbours (see `AnisotropicGradientMagnification`).
+
+    :param value_grid: (n_ecc, n_incl), NaN where a bin has no data.
+    :param n_grid: Voxel count per bin, same shape.
+    :param min_voxels_per_bin: Bins below this are unreliable regardless
+        of value -- this is what catches the sparse, noisy bins at the
+        edge of the nucleus (max eccentricity, |inclination| -> 90 deg).
+    :param outlier_z_threshold: Robust z-score (value - row median) /
+        (1.4826 * row MAD) above which a bin is flagged.
+    :return: Boolean array, same shape, True where the bin is usable.
+    """
+    reliable = (n_grid >= min_voxels_per_bin) & np.isfinite(value_grid)
+    for e in range(value_grid.shape[0]):
+        row_ok = reliable[e]
+        if row_ok.sum() < 3:
+            continue  # too few points on this row to judge an outlier
+        row_vals = value_grid[e, row_ok]
+        median = np.median(row_vals)
+        mad = np.median(np.abs(row_vals - median))
+        if mad == 0:
+            # A degenerate MAD does not mean "nothing is an outlier" --
+            # it means most of the row agrees exactly, so anything that
+            # does not match the median is an infinitely-many-sigma
+            # outlier, not a free pass.
+            reliable[e] &= (value_grid[e] == median)
+            continue
+        z = np.abs(value_grid[e] - median) / (1.4826 * mad)
+        reliable[e] &= (z <= outlier_z_threshold)
+    return reliable
+
+
+class AnisotropicGradientMagnification(MagnificationModel):
+    """Anisotropic magnification tabulated once over (eccentricity,
+    inclination), so nothing at simulation time touches the per-voxel
+    Jacobian, or even holds `JacobianAtlas`'s full-grid arrays in memory.
+
+    `AtlasGradientMagnification` already does this for the isotropic
+    scalar case; this is the anisotropic analogue. Instead of collapsing
+    `major`/`minor`/`orientation` to one eccentricity-only scalar, it
+    keeps all three as a 2-D lookup table over (eccentricity,
+    inclination), built once from a computed/loaded `JacobianAtlas` and
+    then cheap to query and to serialise.
+
+    **Why 2-D, and why fine.** The (E, I) surfaces are smooth almost
+    everywhere -- but not at a narrow band around inclination ~-15 deg,
+    present at essentially every eccentricity beyond ~20 deg and sitting
+    well inside the parvocellular layers (it is NOT the magno/parvo
+    laminar boundary, which sits elsewhere in the field; checked against
+    `atlas.layers.classes` before adopting this design). There the local
+    Jacobian's minor-axis magnification collapses. A bin spanning that
+    band mixes torn and clean tissue into one bad median; the default
+    grid (`magnification.anisotropic_gradient.*_bin_width_deg`) is fine
+    enough to isolate the collapse to a few of its own bins instead of
+    smearing it into their neighbours, and `_bin_reliability` marks
+    those bins unreliable so interpolation routes around them -- via the
+    nearest reliable bin -- rather than silently trusting them.
+
+    **Orientation** is only meaningful where the two principal
+    magnifications actually differ. Near-isotropic bins get a
+    near-arbitrary axis (the SVD has no preferred direction to report),
+    so those bins store `orientation=0` rather than that noise --
+    `orientation_reliable_min_anisotropy` sets the gate -- mirroring
+    `AtlasGradientMagnification`'s isotropic default. Interpolated
+    orientation is via the doubled angle (cos 2*theta, sin 2*theta), so
+    averaging never crosses the +-90 deg axis ambiguity or the +-180 deg
+    wrap.
+    """
+
+    def __init__(self, ecc_edges: np.ndarray, incl_edges: np.ndarray,
+                 major_grid: np.ndarray, minor_grid: np.ndarray,
+                 orientation_grid: np.ndarray, n_grid: np.ndarray,
+                 reliable_grid: np.ndarray, isotropic_grid: np.ndarray,
+                 orientation_reliable_min_anisotropy: float,
+                 params: Optional[Mapping] = None):
+        self.params = params
+        self.ecc_edges = np.asarray(ecc_edges, dtype=float)
+        self.incl_edges = np.asarray(incl_edges, dtype=float)
+        self.ecc_centers = 0.5 * (self.ecc_edges[:-1] + self.ecc_edges[1:])
+        self.incl_centers = 0.5 * (self.incl_edges[:-1] + self.incl_edges[1:])
+        if (len(self.ecc_centers) < 2) or (len(self.incl_centers) < 2):
+            raise ValueError("Need at least 2 bins on each axis to "
+                             "interpolate; got "
+                             f"{len(self.ecc_centers)} x "
+                             f"{len(self.incl_centers)}.")
+
+        self.n_grid = np.asarray(n_grid, dtype=float)
+        self.reliable_grid = np.asarray(reliable_grid, dtype=bool)
+        self.isotropic_grid = np.asarray(isotropic_grid, dtype=bool)
+        self.orientation_reliable_min_anisotropy = float(
+            orientation_reliable_min_anisotropy)
+
+        # NaN out unreliable bins so interpolation routes around torn or
+        # undersampled tissue instead of averaging it in.
+        self.major_grid = np.where(self.reliable_grid, major_grid, np.nan)
+        self.minor_grid = np.where(self.reliable_grid, minor_grid, np.nan)
+        self.orientation_grid = np.asarray(orientation_grid, dtype=float)
+        self._cos2 = np.where(self.reliable_grid,
+                              np.cos(2 * self.orientation_grid), np.nan)
+        self._sin2 = np.where(self.reliable_grid,
+                              np.sin(2 * self.orientation_grid), np.nan)
+
+        reliable_e, reliable_i = np.nonzero(self.reliable_grid)
+        if reliable_e.size == 0:
+            raise ValueError("No (eccentricity, inclination) bin passed "
+                             "the reliability gate; the table is empty. "
+                             "Loosen min_voxels_per_bin or "
+                             "outlier_z_threshold.")
+        self._reliable_ecc = self.ecc_centers[reliable_e]
+        self._reliable_incl = self.incl_centers[reliable_i]
+        self._reliable_e_idx = reliable_e
+        self._reliable_i_idx = reliable_i
+
+    # -- build -----------------------------------------------------------
+    @classmethod
+    def from_jacobian(cls, jacobian_magnification: JacobianMagnification,
+                      cell_class: str = 'parvo',
+                      params: Optional[Mapping] = None
+                      ) -> 'AnisotropicGradientMagnification':
+        """Bin every fit-ok voxel's decomposed Jacobian over (E, I).
+
+        :param jacobian_magnification: Must carry `erwin_atlas` (pass
+            `erwin_atlas=` to its constructor) -- that is where (E, I)
+            per voxel comes from.
+        :param params: Defaults to `jacobian_magnification.params`.
+        """
+        params = (jacobian_magnification.params if params is None
+                  else params)
+        cfg = require(params, 'magnification.anisotropic_gradient')
+        ecc_width = float(cfg['eccentricity_bin_width_deg'])
+        incl_width = float(cfg['inclination_bin_width_deg'])
+        min_voxels_per_bin = int(cfg['min_voxels_per_bin'])
+        outlier_z_threshold = float(cfg['outlier_z_threshold'])
+        aniso_gate = float(cfg['orientation_reliable_min_anisotropy'])
+
+        ea = jacobian_magnification.erwin_atlas
+        ja = jacobian_magnification.jacobian_atlas
+        if ea is None:
+            raise ValueError(
+                "from_jacobian needs the ErwinAtlas -- pass erwin_atlas= "
+                "to the JacobianMagnification.")
+
+        # Same mask as `_eccentricity_table`: no separate ipsi-sentinel
+        # exclusion needed, because those voxels are already excluded
+        # from `valid` before the Jacobian is fit (when
+        # atlas.exclude_ipsi_flat_inclination is set), so they read as
+        # jacobian_valid=False here too.
+        mask = ea.valid & ja.jacobian_valid
+        if cell_class in ('parvo', 'magno'):
+            mask = mask & np.isin(ea.layer,
+                                  resolve_class_codes(params, cell_class))
+
+        idx = np.argwhere(mask)
+        major, minor, orientation = JacobianMagnification.decompose(
+            ja.jacobian_at(idx))
+        sel = tuple(idx.T)
+        ecc = ea.eccentricity_deg[sel]
+        incl = ea.inclination_deg[sel]
+
+        finite = np.isfinite(major) & np.isfinite(minor) & np.isfinite(
+            orientation)
+        ecc, incl, major, minor, orientation = (
+            ecc[finite], incl[finite], major[finite], minor[finite],
+            orientation[finite])
+        if ecc.size == 0:
+            raise ValueError(
+                f"No finite fit-ok voxels for cell_class={cell_class!r}; "
+                f"cannot build a table.")
+
+        ecc_edges = np.arange(0.0, float(ecc.max()) + ecc_width, ecc_width)
+        incl_lo = incl_width * np.floor(float(incl.min()) / incl_width)
+        incl_hi = incl_width * np.ceil(float(incl.max()) / incl_width)
+        incl_edges = np.arange(incl_lo, incl_hi + incl_width, incl_width)
+
+        n_e, n_i = len(ecc_edges) - 1, len(incl_edges) - 1
+        ecc_bin = np.clip(np.digitize(ecc, ecc_edges) - 1, 0, n_e - 1)
+        incl_bin = np.clip(np.digitize(incl, incl_edges) - 1, 0, n_i - 1)
+        flat_bin = ecc_bin * n_i + incl_bin
+        n_bins = n_e * n_i
+
+        n_grid = np.bincount(flat_bin, minlength=n_bins
+                             ).reshape(n_e, n_i).astype(float)
+
+        # Grouped median/circular-mean per bin, via one sort instead of
+        # a Python loop over every (ecc, incl) pair -- the loop below
+        # only runs once per POPULATED bin (at most n_e * n_i of them),
+        # not once per voxel.
+        order = np.argsort(flat_bin, kind='stable')
+        sorted_bin = flat_bin[order]
+        sorted_major = major[order]
+        sorted_minor = minor[order]
+        sorted_cos2 = np.cos(2 * orientation[order])
+        sorted_sin2 = np.sin(2 * orientation[order])
+        unique_bins, starts, counts = np.unique(
+            sorted_bin, return_index=True, return_counts=True)
+
+        major_flat = np.full(n_bins, np.nan)
+        minor_flat = np.full(n_bins, np.nan)
+        cos2_flat = np.full(n_bins, np.nan)
+        sin2_flat = np.full(n_bins, np.nan)
+        for b, start, count in zip(unique_bins, starts, counts):
+            sl = slice(start, start + count)
+            major_flat[b] = np.median(sorted_major[sl])
+            minor_flat[b] = np.median(sorted_minor[sl])
+            cos2_flat[b] = np.mean(sorted_cos2[sl])
+            sin2_flat[b] = np.mean(sorted_sin2[sl])
+
+        major_grid = major_flat.reshape(n_e, n_i)
+        minor_grid = minor_flat.reshape(n_e, n_i)
+        orientation_grid = 0.5 * np.arctan2(sin2_flat.reshape(n_e, n_i),
+                                            cos2_flat.reshape(n_e, n_i))
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            anisotropy_grid = major_grid / minor_grid
+        ecc_centers = 0.5 * (ecc_edges[:-1] + ecc_edges[1:])
+        isotropic_radius = isotropic_construction_radius_deg(params)
+        isotropic_grid = ((anisotropy_grid < aniso_gate)
+                          | (ecc_centers[:, None] < isotropic_radius))
+        orientation_grid = np.where(isotropic_grid, 0.0, orientation_grid)
+
+        reliable_grid = (
+            _bin_reliability(major_grid, n_grid, min_voxels_per_bin,
+                            outlier_z_threshold)
+            & _bin_reliability(minor_grid, n_grid, min_voxels_per_bin,
+                               outlier_z_threshold))
+
+        return cls(ecc_edges, incl_edges, major_grid, minor_grid,
+                   orientation_grid, n_grid, reliable_grid, isotropic_grid,
+                   aniso_gate, params=params)
+
+    # -- query -------------------------------------------------------
+    def _interpolate(self, ecc: np.ndarray, incl: np.ndarray
+                     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
+                               np.ndarray, np.ndarray]:
+        """Bilinear-interpolate major/minor/cos2/sin2 at (ecc, incl).
+
+        Unreliable corners are dropped and the remaining weight
+        renormalised; a query point whose whole 2x2 cell is unreliable
+        falls back to the nearest reliable bin centre (a brute-force
+        nearest search, cheap because the table has at most a few
+        thousand reliable bins -- this runs once per electrode at setup,
+        never per frame).
+
+        :return: (major, minor, cos2, sin2, unreliable) -- `unreliable`
+            is True wherever any corner was dropped or the fallback was
+            used, so the caller can carry that into
+            `LocalMagnification.unreliable_beyond_neighborhood`.
+        """
+        ecc = np.clip(ecc, self.ecc_centers[0], self.ecc_centers[-1])
+        incl = np.clip(incl, self.incl_centers[0], self.incl_centers[-1])
+
+        e_idx = np.clip(np.searchsorted(self.ecc_centers, ecc) - 1,
+                        0, len(self.ecc_centers) - 2)
+        i_idx = np.clip(np.searchsorted(self.incl_centers, incl) - 1,
+                        0, len(self.incl_centers) - 2)
+        e0, e1 = self.ecc_centers[e_idx], self.ecc_centers[e_idx + 1]
+        i0, i1 = self.incl_centers[i_idx], self.incl_centers[i_idx + 1]
+        we = np.where(e1 > e0, (ecc - e0) / (e1 - e0), 0.0)
+        wi = np.where(i1 > i0, (incl - i0) / (i1 - i0), 0.0)
+
+        corners = [(e_idx, i_idx, (1 - we) * (1 - wi)),
+                  (e_idx, i_idx + 1, (1 - we) * wi),
+                  (e_idx + 1, i_idx, we * (1 - wi)),
+                  (e_idx + 1, i_idx + 1, we * wi)]
+
+        major_num = np.zeros_like(ecc, dtype=float)
+        minor_num = np.zeros_like(ecc, dtype=float)
+        cos2_num = np.zeros_like(ecc, dtype=float)
+        sin2_num = np.zeros_like(ecc, dtype=float)
+        weight_sum = np.zeros_like(ecc, dtype=float)
+        for ei, ii, w in corners:
+            major_val = self.major_grid[ei, ii]
+            usable = np.isfinite(major_val) & (w > 0)
+            contribution = np.where(usable, w, 0.0)
+            major_num += contribution * np.where(usable, major_val, 0.0)
+            minor_num += contribution * np.where(
+                usable, self.minor_grid[ei, ii], 0.0)
+            cos2_num += contribution * np.where(
+                usable, self._cos2[ei, ii], 0.0)
+            sin2_num += contribution * np.where(
+                usable, self._sin2[ei, ii], 0.0)
+            weight_sum += contribution
+
+        clean = weight_sum > (1.0 - 1e-6)  # all 4 corners reliable
+        no_data = weight_sum <= 1e-9       # zero reliable corners
+        with np.errstate(divide='ignore', invalid='ignore'):
+            major = np.where(no_data, np.nan, major_num / weight_sum)
+            minor = np.where(no_data, np.nan, minor_num / weight_sum)
+            cos2 = np.where(no_data, np.nan, cos2_num / weight_sum)
+            sin2 = np.where(no_data, np.nan, sin2_num / weight_sum)
+
+        if np.any(no_data):
+            qe, qi = ecc[no_data], incl[no_data]
+            d2 = ((qe[:, None] - self._reliable_ecc[None, :]) ** 2
+                 + (qi[:, None] - self._reliable_incl[None, :]) ** 2)
+            nearest = np.argmin(d2, axis=1)
+            re = self._reliable_e_idx[nearest]
+            ri = self._reliable_i_idx[nearest]
+            major[no_data] = self.major_grid[re, ri]
+            minor[no_data] = self.minor_grid[re, ri]
+            cos2[no_data] = self._cos2[re, ri]
+            sin2[no_data] = self._sin2[re, ri]
+
+        unreliable = ~clean
+        return major, minor, cos2, sin2, unreliable
+
+    def at_eccentricity(self, eccentricity_deg: ArrayLike,
+                        cell_class: str = 'parvo',
+                        inclination_deg: Optional[ArrayLike] = None
+                        ) -> LocalMagnification:
+        if inclination_deg is None:
+            raise ValueError(
+                "AnisotropicGradientMagnification needs inclination_deg: "
+                "the major/minor split and the orientation are both "
+                "functions of visual-field position, not eccentricity "
+                "alone. Use AtlasGradientMagnification where only "
+                "eccentricity is available.")
+        ecc, incl = np.broadcast_arrays(
+            np.atleast_1d(np.asarray(eccentricity_deg, dtype=float)),
+            np.atleast_1d(np.asarray(inclination_deg, dtype=float)))
+        ecc, incl = ecc.ravel(), incl.ravel()
+
+        major, minor, cos2, sin2, unreliable = self._interpolate(ecc, incl)
+        orientation = 0.5 * np.arctan2(sin2, cos2)
+
+        isotropic_radius = (isotropic_construction_radius_deg(self.params)
+                            if self.params is not None else 0.0)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            anisotropy = major / minor
+        isotropic = ((ecc < isotropic_radius)
+                    | ~(anisotropy >= self.orientation_reliable_min_anisotropy))
+        orientation = np.where(isotropic, 0.0, orientation)
+        valid = np.isfinite(major) & np.isfinite(minor)
+
+        return LocalMagnification(
+            major_deg_per_mm=major,
+            minor_deg_per_mm=minor,
+            orientation_rad=orientation,
+            isotropic_by_construction=isotropic,
+            unreliable_beyond_neighborhood=unreliable,
+            valid=valid)
+
+    def at_voxels(self, voxel_indices, erwin_atlas=None
+                 ) -> LocalMagnification:
+        if erwin_atlas is None:
+            raise ValueError("AnisotropicGradientMagnification needs an "
+                             "ErwinAtlas to turn voxel indices into "
+                             "(eccentricity, inclination).")
+        idx = tuple(np.asarray(voxel_indices, dtype=int).T)
+        return self.at_eccentricity(
+            erwin_atlas.eccentricity_deg[idx],
+            inclination_deg=erwin_atlas.inclination_deg[idx])
 
 
 class MalpeliDensityMagnification(MagnificationModel):
@@ -596,8 +977,11 @@ class MalpeliDensityMagnification(MagnificationModel):
                 np.sqrt(vol / t_lo))
 
     def at_eccentricity(self, eccentricity_deg: ArrayLike,
-                        cell_class: Optional[str] = None
+                        cell_class: Optional[str] = None,
+                        inclination_deg: Optional[ArrayLike] = None
                         ) -> LocalMagnification:
+        """:param inclination_deg: Accepted and ignored -- this model is
+            isotropic by construction."""
         if cell_class is not None and cell_class != self.cell_class:
             raise ValueError(
                 f"This model was built for {self.cell_class!r}; construct a "
