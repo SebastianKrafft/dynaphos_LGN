@@ -41,6 +41,39 @@ class TestBuild:
             build_magnification_model(params, synthetic_atlas,
                                       synthetic_jacobian)
 
+    @pytest.mark.parametrize('choice', ['atlas_gradient', 'anisotropic_gradient',
+                                        'malpeli_density'])
+    def test_non_jacobian_model_actually_sizes_the_electrodes(
+            self, params_override, choice):
+        """A non-'jacobian' `magnification.model` must drive sizing, not
+        just get built and discarded.
+
+        `build_electrode_array` used to hand the raw per-voxel Jacobian
+        atlas to every array regardless of `magnification.model`, and
+        `LGNElectrodeArray._resolve_magnification` treats that Jacobian
+        as authoritative whenever it is given -- so the configured model
+        only ever filled its gaps. Every electrode is flagged
+        `scalar_magnification` exactly when the chosen model, not the
+        per-voxel Jacobian, sized it.
+        """
+        params = params_override(magnification__model=choice,
+                                 electrodes__n_electrodes=6,
+                                 synthetic_atlas__shape_ml_dv_ap=(32, 32, 64))
+        sim, parts = build_simulator(params, synthetic=True)
+        array = parts['electrode_array']
+        assert array.jacobian_atlas is None
+        assert array.flags.scalar_magnification.all()
+
+    def test_jacobian_model_still_uses_the_per_voxel_jacobian(
+            self, params_override):
+        params = params_override(magnification__model='jacobian',
+                                 electrodes__n_electrodes=6,
+                                 synthetic_atlas__shape_ml_dv_ap=(32, 32, 64))
+        sim, parts = build_simulator(params, synthetic=True)
+        array = parts['electrode_array']
+        assert array.jacobian_atlas is not None
+        assert not array.flags.scalar_magnification.any()
+
     def test_build_simulator_returns_every_part(self, params_override):
         params = params_override(electrodes__n_electrodes=4,
                                  synthetic_atlas__shape_ml_dv_ap=(32, 32, 64))

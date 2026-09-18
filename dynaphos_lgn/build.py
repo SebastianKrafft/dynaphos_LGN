@@ -263,13 +263,32 @@ def build_electrode_array(params: dict, atlas, jacobian_atlas,
                           rng: Optional[np.random.Generator] = None,
                           voxel_indices: Optional[np.ndarray] = None,
                           visual_field_targets=None,
-                          n_electrodes: Optional[int] = None
+                          n_electrodes: Optional[int] = None,
+                          magnification_model=None
                           ) -> LGNElectrodeArray:
     # Everything else (I_max, tail weight, budgets, scatter points, cell
     # class, sentinel handling) is read from the config by
     # LGNElectrodeArray itself, so there is exactly one place each value
     # lives.
-    common = dict(kernel=kernel, jacobian_atlas=jacobian_atlas)
+    #
+    # `magnification_model` has to reach the CONSTRUCTOR, not be attached
+    # afterwards: `_resolve_magnification` only fills per-voxel Jacobian
+    # gaps from the scalar model when it receives both, and it runs
+    # during __init__. Assigning the attribute later leaves those
+    # electrodes with a NaN magnification and no phosphene.
+    #
+    # `_resolve_magnification` treats `jacobian_atlas` as authoritative
+    # whenever it is given, using `magnification_model` only to fill the
+    # gaps it leaves -- so passing both here would make `magnification.
+    # model` a near-no-op for every choice except 'jacobian' itself, and
+    # defeat the whole point of the cheaper table-based models (a config
+    # switch that silently keeps paying for per-voxel Jacobian lookups).
+    # Pass the raw Jacobian atlas through only when the config actually
+    # asked for it; otherwise the chosen model is the sole source.
+    choice = require(params, 'magnification.model')
+    common = dict(kernel=kernel,
+                  jacobian_atlas=jacobian_atlas if choice == 'jacobian' else None,
+                  magnification_model=magnification_model)
 
     if voxel_indices is not None:
         return LGNElectrodeArray(atlas, params, voxel_indices, rng=rng,
@@ -343,7 +362,8 @@ def build_simulator(params: dict, atlas_dir=None, synthetic: bool = False,
         array = build_electrode_array(
             params, hemisphere_atlas, hemisphere_jacobian, kernel,
             hemisphere_rng, voxels_by_hemisphere[name],
-            targets_by_hemisphere[name], n_electrodes_for(params, name))
+            targets_by_hemisphere[name], n_electrodes_for(params, name),
+            magnification_model=magnification)
         array.magnification_model = magnification
         simulators[name] = LGNPhospheneSimulator(params, array,
                                                  rng=hemisphere_rng)
