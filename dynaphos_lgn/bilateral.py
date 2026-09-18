@@ -112,6 +112,16 @@ class BilateralLGNSimulator:
                                for sim in self.simulators.values()])
 
     @property
+    def no_magnification(self) -> np.ndarray:
+        """Electrodes with no finite magnification, over both nuclei.
+
+        The other way an electrode can be in the model yet absent from
+        the image; see `LGNSize.no_magnification`.
+        """
+        return np.concatenate([sim.no_magnification
+                               for sim in self.simulators.values()])
+
+    @property
     def visual_field(self) -> Map:
         """Every phosphene's position, as one polar `Map`.
 

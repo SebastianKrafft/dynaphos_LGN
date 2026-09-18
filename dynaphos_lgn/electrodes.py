@@ -426,8 +426,14 @@ class LGNElectrodeArray:
             local.valid = local.valid | fallback.valid
             scalar_fallback |= missing
         elif missing.any():
-            logging.warning("%d electrodes have no usable magnification and "
-                            "will render with NaN size.", int(missing.sum()))
+            # No scalar model to fall back on, so these stay non-finite
+            # and LGNSize renders them at zero size -- invisible, not
+            # NaN. Pass a magnification_model to fill them instead.
+            logging.warning(
+                "%d of %d electrodes have no usable magnification. Without "
+                "a magnification_model to fall back on they render at zero "
+                "size, i.e. they drop out of the percept entirely.",
+                int(missing.sum()), self.n_electrodes)
 
         self.local_magnification: LocalMagnification = local
         self.flags = ElectrodeFlags(

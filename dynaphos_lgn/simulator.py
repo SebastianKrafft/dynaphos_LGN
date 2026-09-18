@@ -47,12 +47,34 @@ class LGNSize:
         self.shape = shape
         self.verbose = verbose
         self.data_kwargs = data_kwargs
+
+        major = np.asarray(major_deg_per_mm, dtype=float).ravel()
+        minor = np.asarray(minor_deg_per_mm, dtype=float).ravel()
+
+        # A non-finite magnification means the atlas has no usable
+        # Jacobian at that electrode's voxel. Zeroing it is the only
+        # fallback that does not invent a magnification the atlas never
+        # measured -- but a zero sigma renders an invisible phosphene,
+        # so the electrode drops out of the percept entirely. Say so
+        # rather than letting it vanish, and keep the mask queryable.
+        self.no_magnification = ~(np.isfinite(major) & np.isfinite(minor))
+        n_bad = int(self.no_magnification.sum())
+        if n_bad:
+            logging.warning(
+                "%d of %d electrodes have no finite local magnification "
+                "and will render as zero-size (invisible) phosphenes; "
+                "their recruitment is still computed. Electrode indices: "
+                "%s. See `.no_magnification` for the full mask.",
+                n_bad, self.no_magnification.size,
+                np.array2string(np.flatnonzero(self.no_magnification),
+                                threshold=20))
+
         self.major = to_tensor(
-            np.nan_to_num(np.reshape(major_deg_per_mm, shape[-3:])),
-            **data_kwargs)
+            np.reshape(np.where(self.no_magnification, 0.0, major),
+                       shape[-3:]), **data_kwargs)
         self.minor = to_tensor(
-            np.nan_to_num(np.reshape(minor_deg_per_mm, shape[-3:])),
-            **data_kwargs)
+            np.reshape(np.where(self.no_magnification, 0.0, minor),
+                       shape[-3:]), **data_kwargs)
         self.sigma_major = None
         self.sigma_minor = None
         self.reset()
@@ -125,6 +147,9 @@ class LGNPhospheneSimulator:
             electrode_array.local_magnification.major_deg_per_mm,
             electrode_array.local_magnification.minor_deg_per_mm,
             self.data_kwargs, self.verbose)
+        # Alongside `out_of_view`: the other way an electrode can be
+        # present in the model yet absent from the rendered image.
+        self.no_magnification = self.size.no_magnification
 
         self.effective_charge_per_second = None
         self.layer_activation = None
