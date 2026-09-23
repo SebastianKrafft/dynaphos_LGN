@@ -25,12 +25,14 @@ between them is not a cross-check.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 from dataclasses import dataclass
 from typing import Mapping, Optional, Tuple, Union
 
 import numpy as np
 
+from dynaphos_lgn.atlas import mirror_inclination, mirror_orientation
 from dynaphos_lgn.params import optional, require, resolve_class_codes
 
 ArrayLike = Union[float, np.ndarray]
@@ -340,7 +342,7 @@ class AtlasGradientMagnification(MagnificationModel):
 
     @classmethod
     def from_jacobian(cls, jacobian_magnification: JacobianMagnification,
-                      cell_class: str = 'parvo'
+                      cell_class: Optional[str]
                       ) -> 'AtlasGradientMagnification':
         bin_width_deg = require(
             jacobian_magnification.params,
@@ -505,14 +507,20 @@ class AnisotropicGradientMagnification(MagnificationModel):
     # -- build -----------------------------------------------------------
     @classmethod
     def from_jacobian(cls, jacobian_magnification: JacobianMagnification,
-                      cell_class: str = 'parvo',
+                      cell_class: Optional[str],
                       params: Optional[Mapping] = None
                       ) -> 'AnisotropicGradientMagnification':
         """Bin every fit-ok voxel's decomposed Jacobian over (E, I).
 
+        Build it from the LEFT nucleus and wrap it in
+        `MirroredMagnification` for the right: the right hemifield's
+        horizontal meridian sits on the +-180 deg seam of its own
+        inclination axis, which this table does not wrap across.
+
         :param jacobian_magnification: Must carry `erwin_atlas` (pass
             `erwin_atlas=` to its constructor) -- that is where (E, I)
             per voxel comes from.
+        :param cell_class: 'parvo', 'magno', or None for every lamina.
         :param params: Defaults to `jacobian_magnification.params`.
         """
         params = (jacobian_magnification.params if params is None
@@ -735,6 +743,49 @@ class AnisotropicGradientMagnification(MagnificationModel):
                  ) -> LocalMagnification:
         if erwin_atlas is None:
             raise ValueError("AnisotropicGradientMagnification needs an "
+                             "ErwinAtlas to turn voxel indices into "
+                             "(eccentricity, inclination).")
+        idx = tuple(np.asarray(voxel_indices, dtype=int).T)
+        return self.at_eccentricity(
+            erwin_atlas.eccentricity_deg[idx],
+            inclination_deg=erwin_atlas.inclination_deg[idx])
+
+
+class MirroredMagnification(MagnificationModel):
+    """A model of the left LGN, answering for its mirror image.
+
+    Queries arrive in the right nucleus's frame. Inclination is reflected
+    into the left one's (I -> 180 - I) before the lookup, and the
+    orientation reflected back afterwards. A reflection changes neither
+    eccentricity nor either principal magnification, so nothing is
+    refitted, and the right hemifield's horizontal meridian lands in the
+    middle of the table instead of on its +-180 deg edge.
+
+    :param base: Any `MagnificationModel` built from the left nucleus.
+    """
+
+    def __init__(self, base: MagnificationModel):
+        self.base = base
+        self.params = getattr(base, 'params', None)
+
+    def at_eccentricity(self, eccentricity_deg: ArrayLike,
+                        cell_class: Optional[str] = None,
+                        inclination_deg: Optional[ArrayLike] = None
+                        ) -> LocalMagnification:
+        # Forward cell_class only when given: the wrapped models disagree
+        # on what "not given" means.
+        kwargs = {} if cell_class is None else {'cell_class': cell_class}
+        if inclination_deg is not None:
+            kwargs['inclination_deg'] = mirror_inclination(
+                np.asarray(inclination_deg, dtype=float))
+        local = self.base.at_eccentricity(eccentricity_deg, **kwargs)
+        return dataclasses.replace(
+            local, orientation_rad=mirror_orientation(local.orientation_rad))
+
+    def at_voxels(self, voxel_indices, erwin_atlas=None
+                  ) -> LocalMagnification:
+        if erwin_atlas is None:
+            raise ValueError("MirroredMagnification needs the mirrored "
                              "ErwinAtlas to turn voxel indices into "
                              "(eccentricity, inclination).")
         idx = tuple(np.asarray(voxel_indices, dtype=int).T)

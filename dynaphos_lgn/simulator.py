@@ -375,11 +375,14 @@ class LGNPhospheneSimulator:
                  frequency: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Render one frame of simulated percept."""
         self.update(amplitude, pulse_width, frequency)
-        activation_map = self.spatial_activation()
+        return self.unclamped_percept().clamp(0, 1)
+
+    def unclamped_percept(self) -> torch.Tensor:
+        """The current state's percept, summed over electrodes but not
+        yet clamped, so several nuclei can be added before the clamp."""
         intensity = self.brightness.get() * self.detection_probability()
-        summed = torch.sum(intensity * activation_map,
-                           dim=self._electrode_dimension)
-        return summed.clamp(0, 1)
+        return torch.sum(intensity * self.spatial_activation(),
+                         dim=self._electrode_dimension)
 
     def detection_probability(self) -> torch.Tensor:
         """Gate on tissue activation versus the per-electrode threshold.

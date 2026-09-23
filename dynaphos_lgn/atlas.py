@@ -599,6 +599,36 @@ def mirror_inclination(inclination, scale: float = 1.0,
     return mirrored.astype(values.dtype)
 
 
+def mirror_orientation(orientation_rad):
+    """Reflect a visual-field axis angle across the vertical meridian.
+
+    x -> -x sends an axis at theta to one at pi - theta, which as an
+    AXIS (period pi) is -theta. Returned in (-pi, pi], the same range
+    `JacobianMagnification.decompose` produces, so a mirrored voxel's
+    orientation is comparable with any other.
+    """
+    theta = np.asarray(orientation_rad)
+    mirrored = -theta
+    return np.where(mirrored <= -np.pi, mirrored + 2 * np.pi,
+                    mirrored).astype(theta.dtype)
+
+
+def hemifield_of(hemisphere: str) -> str:
+    """Which half of the visual field a nucleus represents."""
+    if hemisphere == 'left':
+        return 'right'
+    if hemisphere == 'right':
+        return 'left'
+    raise ValueError(f"Unknown hemisphere {hemisphere!r}; expected 'left' "
+                     f"or 'right'.")
+
+
+def _ml_reversed(ndim: int, ml_axis: int) -> tuple:
+    """Index tuple reversing the ML axis, as a view."""
+    return tuple(slice(None, None, -1) if axis == ml_axis else slice(None)
+                 for axis in range(ndim))
+
+
 class MirroredAtlas(ErwinAtlas):
     """The right LGN, as the mirror image of the published left one.
 
@@ -669,10 +699,7 @@ class MirroredAtlas(ErwinAtlas):
 
     @property
     def _reverse(self) -> tuple:
-        """Index tuple reversing the ML axis, as a view."""
-        return tuple(slice(None, None, -1) if axis == self._ml_axis
-                     else slice(None)
-                     for axis in range(len(self.atlas_shape)))
+        return _ml_reversed(len(self.atlas_shape), self._ml_axis)
 
     def build_atlas(self, atlas_dir=None) -> 'MirroredAtlas':
         """Reflect the source atlas.
@@ -778,9 +805,7 @@ class MirroredJacobianAtlas(JacobianAtlas):
 
     @property
     def _reverse(self) -> tuple:
-        return tuple(slice(None, None, -1) if axis == self._ml_axis
-                     else slice(None)
-                     for axis in range(len(self.atlas_shape)))
+        return _ml_reversed(len(self.atlas_shape), self._ml_axis)
 
     def jacobian_at(self, voxel_indices: np.ndarray) -> np.ndarray:
         idx = tuple(np.asarray(voxel_indices, dtype=int).T)
@@ -822,14 +847,13 @@ class MirroredJacobianAtlas(JacobianAtlas):
         """(major, minor, orientation) without touching `jacobian`.
 
         The reflection is orthogonal, so the singular values are the
-        source atlas's own, re-indexed. The leading singular vector
-        picks up ``theta -> pi - theta``: the same axis, seen in a
-        mirror.
+        source atlas's own, re-indexed. The major axis is the source's
+        seen in a mirror; see `mirror_orientation`.
         """
         major, minor, orientation = self.base.singular_values
         flip = self._reverse
         return (major[flip], minor[flip],
-                (np.pi - orientation[flip]).astype(orientation.dtype))
+                mirror_orientation(orientation[flip]))
 
     def compute(self, erwin_atlas) -> 'MirroredJacobianAtlas':
         raise NotImplementedError(

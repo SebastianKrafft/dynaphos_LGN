@@ -19,6 +19,7 @@ from typing import Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from dynaphos.utils import Map
+from dynaphos_lgn.atlas import hemifield_of
 from dynaphos_lgn.current_spread import RecruitmentKernel
 from dynaphos_lgn.magnification import (JacobianMagnification,
                                         LocalMagnification, MagnificationModel,
@@ -413,9 +414,13 @@ class LGNElectrodeArray:
             raise ValueError("Provide either jacobian_atlas or "
                              "magnification_model.")
 
-        if magnification_model is not None and jacobian_atlas is not None:
+        # Anything still missing afterwards is reported by LGNSize, which
+        # renders it at zero size.
+        if (magnification_model is not None and jacobian_atlas is not None
+                and missing.any()):
             # Fill Jacobian gaps from the scalar model rather than
-            # dropping the electrode entirely.
+            # dropping the electrode entirely. Only when there are gaps:
+            # building the fallback can mean decomposing the whole atlas.
             fallback = magnification_model.at_eccentricity(
                 self.eccentricity_deg, inclination_deg=self.inclination_deg)
             for attr in ('major_deg_per_mm', 'minor_deg_per_mm',
@@ -425,15 +430,6 @@ class LGNElectrodeArray:
                                  getattr(local, attr)))
             local.valid = local.valid | fallback.valid
             scalar_fallback |= missing
-        elif missing.any():
-            # No scalar model to fall back on, so these stay non-finite
-            # and LGNSize renders them at zero size -- invisible, not
-            # NaN. Pass a magnification_model to fill them instead.
-            logging.warning(
-                "%d of %d electrodes have no usable magnification. Without "
-                "a magnification_model to fall back on they render at zero "
-                "size, i.e. they drop out of the percept entirely.",
-                int(missing.sum()), self.n_electrodes)
 
         self.local_magnification: LocalMagnification = local
         self.flags = ElectrodeFlags(
@@ -621,7 +617,7 @@ class LGNElectrodeArray:
         return cells.sum(axis=1) * self.voxels_per_candidate
 
     def describe(self) -> str:
-        hemifield = 'right' if self.hemisphere == 'left' else 'left'
+        hemifield = hemifield_of(self.hemisphere)
         mirrored = ('' if self.hemisphere == 'left'
                     else ', mirrored from the published left atlas')
         lines = [

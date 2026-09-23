@@ -37,7 +37,7 @@ import numpy as np
 
 from dynaphos.utils import load_params
 from dynaphos_lgn.atlas import (ErwinAtlas, JacobianAtlas, MirroredAtlas,
-                                MirroredJacobianAtlas)
+                                MirroredJacobianAtlas, hemifield_of)
 from dynaphos_lgn.bilateral import (BilateralLGNSimulator,
                                     split_targets_by_hemifield)
 from dynaphos_lgn.current_spread import RecruitmentKernel
@@ -45,7 +45,8 @@ from dynaphos_lgn.electrodes import LGNElectrodeArray
 from dynaphos_lgn.magnification import (AnisotropicGradientMagnification,
                                         AtlasGradientMagnification,
                                         JacobianMagnification,
-                                        MalpeliDensityMagnification)
+                                        MalpeliDensityMagnification,
+                                        MirroredMagnification)
 from dynaphos_lgn.params import optional, require, resolve_class_codes
 from dynaphos_lgn.simulator import LGNPhospheneSimulator
 
@@ -216,23 +217,16 @@ def n_electrodes_for(params: Mapping, hemisphere: str) -> int:
 
 def build_hemisphere_atlas(params: Mapping, atlas, hemisphere: str):
     """The left atlas as loaded, or its mirror image for the right."""
-    if hemisphere == 'left':
-        return atlas
-    if hemisphere == 'right':
-        return MirroredAtlas(atlas, params)
-    raise ValueError(f"Unknown hemisphere {hemisphere!r}; expected 'left' "
-                     f"or 'right'.")
+    hemifield_of(hemisphere)  # validates the name
+    return atlas if hemisphere == 'left' else MirroredAtlas(atlas, params)
 
 
 def build_hemisphere_jacobian(params: Mapping, jacobian_atlas,
                               hemisphere: str):
     """The cached fit, or the reflection of it. Never a second fit."""
-    if hemisphere == 'left':
-        return jacobian_atlas
-    if hemisphere == 'right':
-        return MirroredJacobianAtlas(jacobian_atlas, params)
-    raise ValueError(f"Unknown hemisphere {hemisphere!r}; expected 'left' "
-                     f"or 'right'.")
+    hemifield_of(hemisphere)  # validates the name
+    return (jacobian_atlas if hemisphere == 'left'
+            else MirroredJacobianAtlas(jacobian_atlas, params))
 
 
 def build_kernel(params: dict) -> RecruitmentKernel:
@@ -241,16 +235,21 @@ def build_kernel(params: dict) -> RecruitmentKernel:
 
 
 def build_magnification_model(params: dict, atlas, jacobian_atlas):
-    """Whichever magnification model the config asks for."""
+    """Whichever magnification model the config asks for.
+
+    The tables are built from the voxels of `electrodes.cell_class`, so
+    a magno array is not sized from parvocellular tissue.
+    """
     choice = require(params, 'magnification.model')
+    cell_class = require(params, 'electrodes.cell_class')
     if choice == 'jacobian':
         return JacobianMagnification(jacobian_atlas, params, atlas)
     if choice == 'atlas_gradient':
         return AtlasGradientMagnification.from_jacobian(
-            JacobianMagnification(jacobian_atlas, params, atlas))
+            JacobianMagnification(jacobian_atlas, params, atlas), cell_class)
     if choice == 'anisotropic_gradient':
         return AnisotropicGradientMagnification.from_jacobian(
-            JacobianMagnification(jacobian_atlas, params, atlas))
+            JacobianMagnification(jacobian_atlas, params, atlas), cell_class)
     if choice == 'malpeli_density':
         return MalpeliDensityMagnification.from_atlas(atlas, params)
     raise ValueError(
@@ -333,7 +332,7 @@ def build_simulator(params: dict, atlas_dir=None, synthetic: bool = False,
            if rng is None else rng)
     names = (configured_hemispheres(params) if hemispheres is None
              else configured_hemispheres({'atlas': {
-                 'hemispheres': list(hemispheres)}}))
+                 'hemispheres': hemispheres}}))
 
     atlas = build_atlas(params, atlas_dir, synthetic)
     cache_dir = (None if getattr(atlas, 'is_synthetic', False)
@@ -351,20 +350,30 @@ def build_simulator(params: dict, atlas_dir=None, synthetic: bool = False,
                   else [np.random.default_rng(int(seed)) for seed
                         in rng.integers(0, 2 ** 62, len(names))])
 
+    # The table-based models are fitted once, on the left nucleus, and
+    # reflected for the right rather than refitted. The per-voxel
+    # 'jacobian' model has nothing to fit and is simply built per side.
+    left_model = (None if require(params, 'magnification.model') == 'jacobian'
+                  else build_magnification_model(params, atlas, jacobian))
+
     parts = {'kernel': kernel, 'hemispheres': {}}
     simulators = {}
     for name, hemisphere_rng in zip(names, generators):
         hemisphere_atlas = build_hemisphere_atlas(params, atlas, name)
         hemisphere_jacobian = build_hemisphere_jacobian(params, jacobian,
                                                         name)
-        magnification = build_magnification_model(
-            params, hemisphere_atlas, hemisphere_jacobian)
+        if left_model is None:
+            magnification = build_magnification_model(
+                params, hemisphere_atlas, hemisphere_jacobian)
+        elif name == 'left':
+            magnification = left_model
+        else:
+            magnification = MirroredMagnification(left_model)
         array = build_electrode_array(
             params, hemisphere_atlas, hemisphere_jacobian, kernel,
             hemisphere_rng, voxels_by_hemisphere[name],
             targets_by_hemisphere[name], n_electrodes_for(params, name),
             magnification_model=magnification)
-        array.magnification_model = magnification
         simulators[name] = LGNPhospheneSimulator(params, array,
                                                  rng=hemisphere_rng)
         parts['hemispheres'][name] = {

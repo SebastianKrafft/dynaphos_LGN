@@ -36,6 +36,7 @@ import numpy as np
 import torch
 
 from dynaphos.utils import Map, to_numpy
+from dynaphos_lgn.atlas import hemifield_of
 from dynaphos_lgn.simulator import LGNPhospheneSimulator
 
 
@@ -227,13 +228,8 @@ class BilateralLGNSimulator:
         the same electrodes would produce.
         """
         self.update(amplitude, pulse_width, frequency)
-        total = None
-        for sim in self.simulators.values():
-            intensity = sim.brightness.get() * sim.detection_probability()
-            summed = torch.sum(intensity * sim.spatial_activation(),
-                               dim=sim.electrode_dimension)
-            total = summed if total is None else total + summed
-        return total.clamp(0, 1)
+        return sum(sim.unclamped_percept()
+                   for sim in self.simulators.values()).clamp(0, 1)
 
     # ------------------------------------------------------------------
     # Stimulus sampling
@@ -318,16 +314,6 @@ class BilateralLGNSimulator:
                 "that does")
             lines.append("and does not claim.")
         return '\n'.join(lines).rstrip()
-
-
-def hemifield_of(hemisphere: str) -> str:
-    """Which half of the visual field a nucleus represents."""
-    if hemisphere == 'left':
-        return 'right'
-    if hemisphere == 'right':
-        return 'left'
-    raise ValueError(f"Unknown hemisphere {hemisphere!r}; expected 'left' "
-                     f"or 'right'.")
 
 
 def split_targets_by_hemifield(eccentricity_deg: Sequence[float],

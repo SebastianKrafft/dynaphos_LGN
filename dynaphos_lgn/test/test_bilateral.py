@@ -285,6 +285,23 @@ class TestMirroredJacobianAtlas:
         assert np.allclose(major[index], expected[0], equal_nan=True)
         assert np.allclose(minor[index], expected[1], equal_nan=True)
 
+    def test_decompose_valid_orientation_matches_a_direct_decomposition(
+            self, mirrored_jacobian, voxel_pairs):
+        """Same axis and same (-pi, pi] range as decomposing the mirrored
+        Jacobian directly, so the two can be compared."""
+        from dynaphos_lgn.magnification import JacobianMagnification
+        _, _, orientation = mirrored_jacobian.decompose_valid()
+        mirrored, _ = voxel_pairs
+        got = orientation[tuple(mirrored.T)]
+        expected = JacobianMagnification.decompose(
+            mirrored_jacobian.jacobian_at(mirrored))[2]
+        finite = np.isfinite(got)
+        assert finite.any()
+        assert np.all((got[finite] > -np.pi) & (got[finite] <= np.pi))
+        # Axes, so compare the doubled angle.
+        assert np.allclose(np.exp(2j * got[finite]),
+                           np.exp(2j * expected[finite]), atol=1e-4)
+
     def test_refuses_to_be_refitted_or_cached(self, mirrored_jacobian,
                                               synthetic_atlas, tmp_path):
         with pytest.raises(NotImplementedError):
@@ -401,6 +418,23 @@ class TestBuildDispatch:
         simulator, _ = build_simulator(lgn_params, synthetic=True,
                                        hemispheres=['left', 'right'])
         assert isinstance(simulator, BilateralLGNSimulator)
+
+    def test_the_hemisphere_argument_accepts_a_bare_name(self, lgn_params):
+        """As `atlas.hemispheres: right` does in the YAML."""
+        simulator, _ = build_simulator(lgn_params, synthetic=True,
+                                       hemispheres='right')
+        assert simulator.hemisphere == 'right'
+
+    def test_table_models_are_fitted_once_and_reflected(
+            self, params_override):
+        from dynaphos_lgn.magnification import MirroredMagnification
+        params = params_override(atlas__hemispheres=['left', 'right'],
+                                 magnification__model='atlas_gradient')
+        _, parts = build_simulator(params, synthetic=True)
+        left = parts['hemispheres']['left']['magnification']
+        right = parts['hemispheres']['right']['magnification']
+        assert isinstance(right, MirroredMagnification)
+        assert right.base is left
 
     def test_both_nuclei_share_one_atlas_load_and_one_fit(self, bilateral):
         """Reflecting is re-indexing. Loading the atlas twice, or

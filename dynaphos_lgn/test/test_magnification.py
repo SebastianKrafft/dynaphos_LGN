@@ -284,7 +284,7 @@ class TestAtlasGradient:
             self, synthetic_atlas, synthetic_jacobian, lgn_params):
         jm = mg.JacobianMagnification(synthetic_jacobian, lgn_params,
                                       synthetic_atlas)
-        scalar = mg.AtlasGradientMagnification.from_jacobian(jm)
+        scalar = mg.AtlasGradientMagnification.from_jacobian(jm, 'parvo')
         local = scalar.at_eccentricity(np.array([5.0, 15.0]))
         assert np.allclose(local.anisotropy, 1.0)
         assert np.all(local.isotropic_by_construction)
@@ -332,7 +332,25 @@ class TestAnisotropicGradient:
         jm = mg.JacobianMagnification(synthetic_jacobian, lgn_params,
                                       synthetic_atlas)
         return mg.AnisotropicGradientMagnification.from_jacobian(
-            jm, params=lgn_params)
+            jm, 'parvo', params=lgn_params)
+
+    def test_mirrored_model_answers_in_the_reflected_frame(self, model):
+        """The right nucleus's query at (E, 180 - I) is the left table's
+        answer at (E, I), with the orientation seen in a mirror -- and a
+        query on the +-180 deg seam is just the left table's I = 0."""
+        mirrored = mg.MirroredMagnification(model)
+        ecc = np.array([5.0, 15.0, 15.0])
+        incl = np.array([10.0, -30.0, 0.0])
+        left = model.at_eccentricity(ecc, inclination_deg=incl)
+        right = mirrored.at_eccentricity(ecc, inclination_deg=180.0 - incl)
+        assert np.allclose(right.major_deg_per_mm, left.major_deg_per_mm)
+        assert np.allclose(right.minor_deg_per_mm, left.minor_deg_per_mm)
+        assert np.allclose(np.cos(2 * right.orientation_rad),
+                           np.cos(2 * left.orientation_rad))
+        assert np.allclose(np.sin(2 * right.orientation_rad),
+                           -np.sin(2 * left.orientation_rad))
+        assert np.all((right.orientation_rad > -np.pi)
+                      & (right.orientation_rad <= np.pi))
 
     def test_requires_inclination(self, model):
         with pytest.raises(ValueError, match='inclination_deg'):
