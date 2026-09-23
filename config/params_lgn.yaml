@@ -572,3 +572,334 @@ validation:
   report_eccentricity_edges: [0, 1, 5, 10, 20, 30, 90]
   jacobian_report_sample_size: 400000
   jacobian_report_seed: 0
+
+# ----------------------------------------------------------------------
+# 3-D visualisation
+# ----------------------------------------------------------------------
+# Defaults for `dynaphos_lgn.viz3d`, which draws the nucleus as a voxel
+# surface and paints per-voxel atlas quantities onto it. None of these
+# numbers enter the model -- they change what you look at, not what is
+# computed -- but they live here for the same reason everything else
+# does: so a picture can be re-made from a config rather than from a
+# remembered set of command-line flags.
+visualization:
+  backend: plotly               # plotly | matplotlib
+
+  # One rendered voxel per `stride_vox` atlas voxels along each axis, so
+  # the drawn mesh is coarser than the atlas by stride^3. A block is
+  # drawn when ANY atlas voxel in it is tissue, and takes its overlay
+  # value from the tissue voxel nearest its centre -- one real atlas
+  # voxel, never an average or an interpolation between them. 1 is the
+  # full 25 um grid, and slow enough to be a deliberate choice.
+  stride_vox: 4
+
+  # Which quantities get painted on the surface. The plotly backend
+  # puts them all in one dropdown and recolours the same mesh; the
+  # matplotlib backend draws one panel each. The first is shown first.
+  #
+  # The shipped list is the one that needs nothing but the four .DAT
+  # files. The seven Jacobian-derived overlays -- magnification_major,
+  # magnification_minor, anisotropy, magnification_areal,
+  # magnification_orientation, jacobian_residual, jacobian_flags --
+  # each need the cached per-voxel Jacobian, which is ~110 MB on disk
+  # and half a gigabyte in memory, so they are opt-in: add them here,
+  # name them with --overlay, or ask for --overlay all.
+  overlays: [eccentricity, inclination, cell_class, layer, eye,
+             cells_per_voxel]
+
+  # Colour scale per overlay. These are MATPLOTLIB colormap names in
+  # both backends: the plotly scales are sampled from the same colormap
+  # rather than named separately, so the two backends produce the same
+  # colours for the same number.
+  colormaps:
+    eccentricity: viridis
+    inclination: twilight          # cyclic: inclination wraps
+    cell_class: Set1
+    layer: Set2
+    eye: Set3
+    cells_per_voxel: magma
+    magnification_major: plasma
+    magnification_minor: plasma
+    anisotropy: cividis
+    magnification_areal: plasma
+    magnification_orientation: twilight
+    jacobian_residual: inferno
+    jacobian_flags: Set1
+
+  # Voxels with no value -- outside the fit, or carrying a sentinel --
+  # are drawn in this colour rather than at one end of the scale, so
+  # "not measured" never reads as "measured, and small".
+  missing_colour: '#b0b0b0'
+  # How much of the colour axis that grey band takes. Big enough to
+  # be legible on the colourbar, small enough not to compress the
+  # real range; it is reserved below the low end, never inside it.
+  missing_band_fraction: 0.05
+
+  # Colour limits. `percentile` clips at these percentiles of the drawn
+  # voxels instead of at the extremes, so a single outlier cannot
+  # flatten the scale. Only the overlays listed are clipped; the rest
+  # use their full range, and categorical ones ignore this entirely.
+  colour_limits:
+    percentile: [2.0, 98.0]
+    clipped_overlays: [cells_per_voxel, magnification_major,
+                       magnification_minor, anisotropy,
+                       magnification_areal, jacobian_residual]
+
+  surface:
+    opacity: 1.0
+    flat_shading: True          # voxel faces ARE flat; smooth shading
+                                # would imply a continuity the 25 um
+                                # grid does not have
+    show_edges: False           # matplotlib only: outline every voxel
+                                # face. Informative at stride >= 8,
+                                # illegible below it
+    edge_width: 0.05
+    # Lambert lighting, used by both backends: plotly passes these to
+    # its own model, matplotlib shades each face by
+    # ambient + diffuse * |n . light|.
+    lighting:
+      ambient: 0.55
+      diffuse: 0.8
+      specular: 0.08
+      roughness: 0.6
+      fresnel: 0.1
+      light_direction: [0.6, 0.5, 0.6]   # matplotlib only
+
+  # A hoverable point cloud of the drawn voxel centres, carrying every
+  # overlay's number at that voxel. Hidden until you click it in the
+  # legend, because it is the one part of the figure heavy enough to
+  # slow rotation down.
+  hover_points:
+    enabled: True
+    max_points: 8000
+    marker_size: 2
+    colour: '#404040'
+
+  electrodes:
+    marker_size: 7
+    marker_symbol: diamond
+    colour: '#e6194b'
+    colour_by: none             # none | layer | cell_class | hemisphere
+                                # | flagged | render_mode
+    label_every: 0              # text-label every Nth electrode; 0 none
+    # The tissue each electrode reaches at `spread_current_ua`, drawn as
+    # a translucent sphere of the recruitment kernel's own radius. Off
+    # by default: 64 spheres hide the surface they sit on.
+    show_spread: False
+    spread_current_ua: 100.0
+    spread_radius: nominal      # nominal (the Stoney radius) | effective
+                                # (where the smooth kernel's tail is
+                                # truncated, i.e. what was gathered)
+    spread_opacity: 0.18
+    spread_resolution: 12       # points per sphere parametric direction
+
+  # Where the two nuclei sit on the scene's x axis. The atlas's own ML
+  # coordinate is lateral DISTANCE from the midline and so is positive
+  # in both nuclei; drawn as given, the two would superimpose. The sign
+  # below separates them, in the neurological convention (left nucleus
+  # at negative x).
+  scene:
+    left_nucleus_x_sign: -1
+    axis_labels:
+      x: 'ML (mm, signed: left nucleus negative)'
+      y: 'DV (mm, Horsley-Clarke)'
+      z: 'AP (mm, Horsley-Clarke)'
+    background: '#ffffff'
+    camera_eye: [1.6, 1.1, 1.0]
+
+  # ------------------------------------------------------------------
+  # Coronal / sagittal / horizontal slices
+  # ------------------------------------------------------------------
+  # `dynaphos_lgn.slices` cuts the same volume into planes and paints
+  # the same overlays on them. A slice is ONE VOXEL thick -- 25 um --
+  # so what it shows is the atlas at a plane, not an average through a
+  # slab, and it is never interpolated: one screen pixel is one atlas
+  # voxel or it is nothing.
+  slices:
+    plane: coronal              # coronal (fixed AP) | sagittal (fixed
+                                # ML) | horizontal (fixed DV)
+    count: 9                    # slices in a montage or a slider
+    range_mm: null              # [low, high] along the plane's normal;
+                                # null spans the tissue itself
+    # The nucleus tapers to a handful of voxels at each end, and a
+    # montage spread over every plane with anything in it spends two
+    # panels on almost nothing. A plane has to hold at least this share
+    # of the fullest plane's voxels to be one of the ends that
+    # automatic slices are spread between. It moves where slices are
+    # PLACED and never what one shows; 0 uses every plane with a single
+    # voxel in it, and an explicit range_mm overrides it either way.
+    min_slice_fraction: 0.01
+    # Contacts within this distance of the plane are drawn on it. A
+    # slice is 25 um thick and an electrode is a point, so with no slab
+    # at all a contact would essentially never land exactly on one.
+    electrode_slab_mm: 0.25
+    # Colour limits are taken once from a random sample of the whole
+    # selected volume, not from each plane, so a colour means the same
+    # number on every slice and the scale does not move when the slider
+    # does. This is how many tissue voxels that sample draws.
+    colour_limit_sample: 200000
+    crosshair: True             # mark where the other two planes cut
+    crosshair_colour: '#e6194b'
+    orientation_letters: True   # L/R, D/V, A/P on the panel edges
+    background: '#101010'       # behind the tissue: what the atlas has
+                                # no voxel for at all, as distinct from
+                                # a voxel with no value, which is grey
+    montage_columns: 3
+    figsize: [3.8, 3.4]         # inches, PER PANEL
+    dpi: 150
+
+  # ------------------------------------------------------------------
+  # Slice and surface in one figure
+  # ------------------------------------------------------------------
+  # `slices.py --view combined`: the nucleus as a translucent shell on
+  # the left, the active slice flat on the right, and that same slice
+  # drawn where it actually cuts, inside the shell. One slider moves
+  # both.
+  combined:
+    plane: coronal              # which plane the slider steps through
+    # The shell is CONTEXT, not data: it is one colour, and see-through,
+    # so the cut plane inside it stays readable. To paint the surface
+    # itself with an overlay, use the 3-D viewer -- two coloured
+    # surfaces in one scene fight each other.
+    shell_colour: '#8fa9bf'
+    shell_opacity: 0.16
+    # The in-scene copy of the slice is coarser than the flat one: it
+    # is there to show where the cut is, and a 25 um texture on a plane
+    # seen edge-on costs a lot to say very little. Still no averaging
+    # -- every third voxel, not the mean of three.
+    plane_stride_vox: 3
+    # plotly.js shows the FIRST frame when the figure opens, whatever
+    # the slider is told to start on, so the first slice is the one
+    # that has to look like something. This is the share of the fullest
+    # plane's voxels a plane must hold to be one of the ends the slider
+    # spans -- higher than the montage's, which opens on nothing in
+    # particular. It moves where slices are placed, never what one
+    # shows, and an explicit --range overrides it.
+    min_slice_fraction: 0.10
+    scene_width_fraction: 0.56  # of the figure, the rest is the panel
+    show_all_electrodes: True   # the whole array, faintly, in the scene
+    # There is no Play button, and that is not an omission: stepping
+    # through the slices is a plotly ANIMATION, and plotly cannot
+    # animate a heatmap -- the flat panel would simply stop being
+    # drawn. The slider restyles instead, which redraws everything.
+
+  # ------------------------------------------------------------------
+  # The live explorer
+  # ------------------------------------------------------------------
+  # `dynaphos_lgn.explore` drives the same volume from ipywidgets with
+  # the kernel still attached, so nothing has to be precomputed and the
+  # controls are free: any slice position, any spacing, any plane. It
+  # writes no file -- the values below are where its controls START,
+  # and `Explorer.export()` hands back the ones you ended on.
+  explorer:
+    plane: coronal              # which plane it opens on
+    # A stack of parallel cuts rather than one. `count` of them,
+    # `spacing_mm` apart, one of them exactly at the position control.
+    # The spacing is snapped to whole 25 um voxels, and the snapped
+    # value is what the status line reports -- the stack is built
+    # outwards from the active plane, so a spacing the grid cannot
+    # express moves the OTHERS and never the one being read.
+    count: 1
+    spacing_mm: 0.5
+    max_planes: 15              # how many Surface traces the figure
+                                # holds. The control cannot exceed it,
+                                # because a live figure keeps its trace
+                                # list fixed and shows or hides them.
+    # As `combined.plane_stride_vox`, but for the live figure, which
+    # redraws every one of its planes on every control change: every
+    # nth voxel, never the mean of n.
+    plane_stride_vox: 3
+    # The companions are drawn coarser still, by this factor. They are
+    # context -- seen edge-on, at the opacity below, with the flat
+    # panel carrying the detail -- and on two nuclei they are most of
+    # what a redraw ships: at stride 3 a nine-plane coronal stack is
+    # over 8 MB of JSON per move, and nearly half of that goes away
+    # here without anything becoming visibly coarser.
+    companion_stride_multiple: 2
+    # The plane the flat panel is showing is opaque and the rest of
+    # the stack is not, because otherwise a stack of identical-looking
+    # planes says nothing about which one you are reading.
+    active_plane_opacity: 1.0
+    companion_plane_opacity: 0.35
+    # Redraw while a slider is still moving. The flat panel is one
+    # image pixel per atlas voxel and a coronal one spans both nuclei,
+    # so a redraw is a megabyte or so over the kernel connection:
+    # pleasant on one nucleus, laggy on two. False redraws on release.
+    continuous_update: False
+    controls_width: '340px'         # CSS width of the control column,
+                                    # which sits BESIDE the figure and
+                                    # is pinned: a flex column shrinks
+                                    # by default, and a squeezed slider
+                                    # loses its track before it loses
+                                    # its label, so it reads as a
+                                    # caption rather than a control.
+    description_width: '95px'
+    # The live figure is sized for a notebook cell next to that column,
+    # not for a standalone HTML file, so it does not use
+    # `visualization.figure`: 1150 px of figure plus 340 px of controls
+    # overflows every notebook width there is.
+    figure_width: 780
+    figure_height: 700
+    # Slider bounds and steps. Not physics: they cap what you can ASK
+    # for, which is exactly why they belong here rather than in the
+    # widget code where nobody would find them. The low end of both
+    # millimetre ranges is the atlas's own voxel and is taken from the
+    # grid, so it follows a resampled atlas without being restated.
+    limits:
+      spacing_max_mm: 3.0
+      slab_max_mm: 2.0
+      slab_step_mm: 0.025
+      plane_stride_max_vox: 10
+      shell_stride_max_vox: 12
+      shell_opacity_step: 0.02
+      eccentricity_step_deg: 0.5
+      layer_rows: 4
+    # plotly's widget ships only ONE-dimensional arrays to the browser
+    # as binary buffers (see `plotly.serializers._py_to_js`), and every
+    # array a cut plane or a flat panel is made of has two dimensions,
+    # so they all travel as JSON text. Rounding is what keeps that text
+    # small: -10.774999999999999 costs twenty characters to say what
+    # -10.775 says in seven, and a two-nucleus coronal redraw is a
+    # million numbers. Neither rounding is visible -- the first is a
+    # tenth of a micrometre on a 25 um grid, the second a ten-thousandth
+    # of the colour range on a screen that resolves a few hundredths.
+    coordinate_decimals: 4
+    colour_significant_digits: 4
+    export:
+      # Where `export().save()` writes, under
+      # visualization.output.directory unless given an absolute path.
+      fragment_name: lgn_explorer_settings.yaml
+      full_name: params_lgn_explorer.yaml
+      # Which `slices.py --view` the exported command line reproduces
+      # the picture with. 'combined' is the one that looks like the
+      # explorer; 'slices' drops the 3-D half and is much smaller.
+      command_view: combined
+
+  figure:
+    width: 1150                 # plotly, pixels
+    height: 850
+    matplotlib_figsize: [5.5, 4.8]   # inches, PER PANEL: a figure of
+                                     # several overlays grows with the
+                                     # grid instead of shrinking them
+    matplotlib_dpi: 140
+    matplotlib_panel_columns: 3
+
+  output:
+    directory: examples/out
+    html_name: lgn_3d.html
+    png_name: lgn_3d.png
+    ortho_html_name: lgn_ortho.html
+    ortho_png_name: lgn_ortho.png
+    slices_html_name: lgn_slices.html
+    slices_png_name: lgn_slices.png
+    combined_html_name: lgn_slice_in_3d.html
+    combined_png_name: lgn_slice_in_3d.png
+    open_browser: True
+    # How plotly.js reaches the browser. 'inline' embeds it, giving a
+    # ~4 MB file that works with no network at all; 'cdn' loads it
+    # from the internet and keeps the file small.
+    plotlyjs: inline            # inline | cdn
+    # Past this, an HTML figure is worth a word of warning: it still
+    # opens, but slowly, and there are cheaper ways to ask the same
+    # question. The combined view is the one that reaches it.
+    size_warning_mb: 25

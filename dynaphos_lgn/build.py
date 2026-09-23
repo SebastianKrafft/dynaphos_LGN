@@ -59,9 +59,8 @@ def load_lgn_params(path: Union[str, Path]) -> dict:
 def atlas_file_specs(params: Mapping) -> dict:
     """{filename: bytes_per_voxel} from `atlas.files`.
 
-    LAYERS.DAT is the odd one out at one byte, and a headerless read at
-    the wrong width silently succeeds -- so `check_atlas_files` measures
-    each file rather than trusting the config.
+    LAYERS.DAT is the odd one out at one byte, and a headerless read with
+    bytes per voxel silently succeeds.
     """
     return {spec['name']: spec['bytes_per_voxel']
             for spec in require(params, 'atlas.files').values()}
@@ -70,9 +69,8 @@ def atlas_file_specs(params: Mapping) -> dict:
 def check_atlas_files(directory: Union[str, Path], params: Mapping) -> str:
     """Verify each .DAT file's size against the dtype it is read with.
 
-    A headerless binary read at the wrong width does not fail -- it
-    silently produces a differently-shaped, entirely wrong volume. This
-    is the cheapest possible check that it has not happened.
+    A headerless binary read with the wrong bytes per voxel does not fail, it
+    silently produces a differently-shaped, entirely wrong volume.
     """
     directory = Path(directory)
     n_voxels = int(np.prod(require(params, 'atlas.shape_ml_dv_ap')))
@@ -597,28 +595,6 @@ def jacobian_report(jacobian_atlas, atlas, params: Mapping) -> str:
         lines.append(
             f"    {lo:>3.0f}-{hi:<3.0f}    {n:>10,}   {a:>6.2f}   {b:>6.2f}"
             f"   {a / b if b else float('nan'):>5.2f}   {flag * 100:>6.1f}%")
-
-    lines += [
-        "",
-        "    sigma1/sigma2 are the two principal magnifications in deg/mm;",
-        "    aniso is their ratio. Connolly & Van Essen report 2-3x near the",
-        "    horizontal meridian (parvocellular layer 6), reversed near the",
-        "    vertical meridian (magnocellular layer 1) -- QUALITATIVE, and a",
-        "    checkpoint rather than a target. Rows inside the central 1 deg",
-        "    are isotropic by construction: Erwin et al. assigned",
-        "    eccentricity there from Malpeli's own isotropic formula, so any",
-        "    anisotropy found there is an artefact of how the atlas was",
-        "    built, not a measurement.",
-        "",
-        "    The 'unreliable' column rising with eccentricity is expected",
-        "    and correct: deg/mm rises toward the periphery, so a fixed",
-        "    physical current-spread radius covers progressively more",
-        "    visual field -- exactly where trusting one point-evaluated",
-        "    Jacobian across a whole footprint is riskiest. It does NOT",
-        "    mark the six-to-four layer transition; a plain linear",
-        "    extrapolation cannot separate a tear from ordinary fast",
-        "    curvature, and this flag does not claim to.",
-    ]
     return '\n'.join(lines)
 
 
