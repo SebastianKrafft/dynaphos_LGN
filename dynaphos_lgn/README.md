@@ -188,9 +188,9 @@ python examples/demo_bilateral_lgn.py
 
 writes a four-panel figure: where the electrodes sit by nucleus, a
 target image spanning both hemifields, what one nucleus perceives of it,
-and what two do. `examples/demo_simulator_lgn_bilateral.ipynb` is the
-longer walkthrough -- the bilateral counterpart of
-`demo_simulator_lgn.ipynb`, section for section.
+and what two do. `examples/demo_simulator_lgn.ipynb` is the longer
+walkthrough: one `HEMISPHERES` switch at the top runs every section with
+one nucleus or both, and section 1 puts the two side by side.
 
 ## Four design decisions worth knowing about
 
