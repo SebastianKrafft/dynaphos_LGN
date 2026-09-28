@@ -253,43 +253,52 @@ class ScatterRenderer:
                bandwidth_deg: torch.Tensor) -> torch.Tensor:
         """Rendered activation maps, peak 1.
 
-        :param weights: (n_electrodes, n_points) recruitment weights.
-        :param bandwidth_deg: (n_electrodes,) splat bandwidth.
-        :return: (n_electrodes, res_y, res_x)
+        :param weights: (..., n_electrodes, n_points) recruitment weights.
+        :param bandwidth_deg: (..., n_electrodes) splat bandwidth, or
+            (n_electrodes,) shared across the leading dimensions.
+        :return: (..., n_electrodes, res_y, res_x)
         """
         n = self.n_electrodes
-        w = torch.clamp(weights, min=0)
+        lead = weights.shape[:-2]
+        w = torch.clamp(weights, min=0).reshape(-1, n, self.n_points)
+        batch = w.shape[0]
         # Each point contributes to the four pixels it falls between,
         # and `splat_weight` is point-major (p occupies slots 4p..4p+3),
         # so repeating each weight four times lines the two up.
         contrib = w.repeat_interleave(4, dim=-1) * self.splat_weight
 
-        patch = torch.zeros(n, self.patch_size * self.patch_size,
+        patch = torch.zeros(batch, n, self.patch_size * self.patch_size,
                             device=w.device, dtype=w.dtype)
-        patch = patch.scatter_add(1, self.splat_index, contrib)
-        patch = patch.reshape(1, n, self.patch_size, self.patch_size)
+        patch = patch.scatter_add(
+            2, self.splat_index.expand(batch, -1, -1), contrib)
+        # Every (row, electrode) pair is its own channel, so one grouped
+        # convolution blurs them all with their own kernels.
+        patch = patch.reshape(1, batch * n, self.patch_size, self.patch_size)
 
-        sigma_px = bandwidth_deg / min(self.deg_per_px_x, self.deg_per_px_y)
+        sigma_px = (bandwidth_deg.expand(*lead, n).reshape(-1)
+                    / min(self.deg_per_px_x, self.deg_per_px_y))
         radius = int(min(self.max_kernel_radius_px,
                          max(1, math.ceil(3.0 * float(
                              sigma_px.detach().max())))))
         kernel = _gaussian_kernel1d(sigma_px, radius)
-        kx = kernel.reshape(n, 1, 1, -1)
-        ky = kernel.reshape(n, 1, -1, 1)
+        kx = kernel.reshape(batch * n, 1, 1, -1)
+        ky = kernel.reshape(batch * n, 1, -1, 1)
         patch = F.conv2d(F.pad(patch, (radius, radius, 0, 0),
-                               mode='constant'), kx, groups=n)
+                               mode='constant'), kx, groups=batch * n)
         patch = F.conv2d(F.pad(patch, (0, 0, radius, radius),
-                               mode='constant'), ky, groups=n)
+                               mode='constant'), ky, groups=batch * n)
 
-        patch = patch.reshape(n, -1)
-        peak = patch.amax(dim=1, keepdim=True)
+        patch = patch.reshape(batch, n, -1)
+        peak = patch.amax(dim=-1, keepdim=True)
         patch = patch / (peak + 1e-12)
         patch = patch * self.image_mask
 
         res_y, res_x = self.resolution
-        image = torch.zeros(n, res_y * res_x, device=w.device, dtype=w.dtype)
-        image = image.scatter_add(1, self.image_index, patch)
-        return image.reshape(n, res_y, res_x)
+        image = torch.zeros(batch, n, res_y * res_x,
+                            device=w.device, dtype=w.dtype)
+        image = image.scatter_add(
+            2, self.image_index.expand(batch, -1, -1), patch)
+        return image.reshape(*lead, n, res_y, res_x)
 
 
 def _smooth_max(a: torch.Tensor, b: torch.Tensor,

@@ -137,6 +137,50 @@ class TestPhysics:
             sim.num_phosphenes
 
 
+class TestBatching:
+    """`run.batch_size` stacks independent stimuli along a leading
+    dimension. Each row must render exactly what an unbatched call with
+    that row's amplitudes would -- through both render paths."""
+
+    AMPLITUDES_A = (30e-6, 60e-6, 90e-6)
+
+    @pytest.fixture
+    def batched(self, built, params_override):
+        from dynaphos_lgn.simulator import LGNPhospheneSimulator
+        _, array = built
+        params = params_override(run__batch_size=len(self.AMPLITUDES_A))
+        return LGNPhospheneSimulator(params, array,
+                                     rng=np.random.default_rng(0))
+
+    def _batched_amp(self, sim):
+        return torch.tensor(self.AMPLITUDES_A)[:, None].expand(
+            -1, sim.num_phosphenes).contiguous()
+
+    def test_both_render_paths_are_exercised(self, batched):
+        assert len(batched.ellipse_index) and len(batched.scatter_index)
+
+    def test_output_shape(self, batched):
+        img = batched(self._batched_amp(batched))
+        res_x, res_y = batched.params['run']['resolution']
+        assert img.shape == (len(self.AMPLITUDES_A), res_y, res_x)
+
+    def test_rows_match_unbatched_calls(self, built, batched):
+        sim, _ = built
+        batched.update(self._batched_amp(batched))
+        maps = batched.spatial_activation()
+        for row, value in enumerate(self.AMPLITUDES_A):
+            sim.reset()
+            sim.update(_amp(sim, value))
+            torch.testing.assert_close(maps[row], sim.spatial_activation(),
+                                       atol=1e-5, rtol=1e-5)
+
+    def test_gradient_reaches_every_row(self, batched):
+        amp = self._batched_amp(batched).requires_grad_(True)
+        batched.update(amp)
+        batched.spatial_activation().sum().backward()
+        assert torch.all(amp.grad.abs().sum(dim=1) > 0)
+
+
 class TestGradients:
     def test_gradient_reaches_amplitude(self, built):
         sim, _ = built
