@@ -27,7 +27,7 @@ from dynaphos.utils import (get_data_kwargs, get_deg2pix_coeff, print_stats,
                             set_deterministic, to_numpy, to_tensor)
 from dynaphos_lgn.current_spread import RecruitmentKernel
 from dynaphos_lgn.electrodes import LGNElectrodeArray
-from dynaphos_lgn.params import optional, require
+from dynaphos_lgn.params import ParameterError, optional, require
 from dynaphos_lgn.receptive_fields import center_radius_deg
 from dynaphos_lgn.rendering import EllipseGaussianRenderer, ScatterRenderer
 
@@ -107,12 +107,25 @@ class LGNPhospheneSimulator:
     frame, instead of using the precomputed floor. It costs little and
     matters at low amplitudes, where only a tight cluster of voxels is
     active.
+
+    `default_stim.safety_limit_ua` is exposed as `safety_limit_ua`, for
+    whatever chooses the amplitudes to stay under. The forward pass does
+    not clamp to it: model characterisation deliberately sweeps past it.
     """
 
     def __init__(self, params: dict, electrode_array: LGNElectrodeArray,
                  rng: Optional[np.random.Generator] = None):
         self.params = params
         self.array = electrode_array
+        self.safety_limit_ua = float(
+            require(params, 'default_stim.safety_limit_ua'))
+        if not 0 < self.safety_limit_ua <= electrode_array.max_current_ua:
+            raise ParameterError(
+                f"default_stim.safety_limit_ua is {self.safety_limit_ua} "
+                f"uA; it must be positive and at most "
+                f"electrodes.max_current_ua ({electrode_array.max_current_ua}"
+                f" uA), the current the array's neighbourhoods are "
+                f"precomputed for.")
         self.data_kwargs = get_data_kwargs(params)
         self.verbose = require(params, 'run.print_stats')
         self.adaptive_scatter_bandwidth = require(

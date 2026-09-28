@@ -181,6 +181,27 @@ class TestBatching:
         assert torch.all(amp.grad.abs().sum(dim=1) > 0)
 
 
+class TestSafetyLimit:
+    def test_is_read_from_the_config(self, built):
+        sim, _ = built
+        assert sim.safety_limit_ua == \
+            sim.params['default_stim']['safety_limit_ua']
+
+    @pytest.mark.parametrize('limit_ua', [0.0, 1e6])
+    def test_must_lie_within_the_precomputed_range(self, built,
+                                                   params_override,
+                                                   limit_ua):
+        """Above electrodes.max_current_ua the candidate neighbourhoods
+        are too small, so the limit would permit currents the array
+        cannot model."""
+        from dynaphos_lgn.params import ParameterError
+        from dynaphos_lgn.simulator import LGNPhospheneSimulator
+        _, array = built
+        params = params_override(default_stim__safety_limit_ua=limit_ua)
+        with pytest.raises(ParameterError, match='safety_limit_ua'):
+            LGNPhospheneSimulator(params, array)
+
+
 class TestGradients:
     def test_gradient_reaches_amplitude(self, built):
         sim, _ = built

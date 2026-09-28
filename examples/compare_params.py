@@ -1,13 +1,40 @@
 """Compare LGN simulator parameter sets, quantitatively, on the same
-electrodes and the same images.
+electrodes and the same images, under optimised stimulation.
 
 Every condition is a set of config overrides applied to one shared base
 config. Each condition is built with the same `run.seed`, so the
 electrode array is the same draw every time and only the parameter under
 test changes. The script checks this and reports it (`same_electrodes`).
 
+Stimulation is optimised, not mapped from brightness. For every image,
+the per-electrode amplitudes are found by gradient descent through the
+simulator so that the percept matches the image, each amplitude bounded
+to [0, `default_stim.safety_limit_ua`] from the config. The optimiser is
+free to use low currents where high ones would merge phosphenes into
+one bright mass, so a condition is judged by the best percept it can
+produce, not by what a fixed brightness-to-current rule makes of it.
+
+    loss       mean squared difference between percept and image, both
+               blurred to ANALYSIS_BLUR_DEG and pooled to the analysis
+               grid, inside the covered region. The percept is taken
+               before the [0, 1] clamp, so light spilling into the
+               background is penalised even where it saturates.
+    start      every electrode at the rheobase plus START_FRACTION of
+               the way to the safety limit. Below the rheobase the model
+               delivers no charge, so there is no gradient: an electrode
+               started there could never switch on.
+    final      amplitudes that end below the rheobase are set to zero
+               (they deliver no charge, so a protocol would not send
+               them) and the percept is rendered once more.
+
+The optimiser knows each electrode's threshold, as it would after
+per-electrode calibration in a patient. A hard threshold passes no
+gradient, so `thresholding.soft_threshold: False` is optimised against
+its logistic surrogate (the 'none' baseline, whose 50% point is the hard
+gate's step) and then rendered with the hard gate.
+
 There is no ground-truth LGN percept to score against, so the metrics
-fall into three groups. They are reported side by side, never combined:
+fall into three groups, reported side by side, never combined:
 
 1. Benchmarks against measured LGN data
      threshold_ua        median current at which p(detect) crosses 0.5,
@@ -15,60 +42,71 @@ fall into three groups. They are reported side by side, never combined:
      threshold_z         (threshold_ua - 40) / 12, Pezaris & Reid (2007)
      sigma_deg_40ua,     median phosphene sigma (geometric mean of major
      sigma_deg_100ua     and minor), degrees
-2. Task performance
-     acc_linear,         held-out MNIST accuracy of a linear probe and
-     acc_cnn             of a small CNN, trained on the percepts
-     acc_linear_amps     linear probe on the electrode amplitudes, i.e.
-                         before the simulator: what the encoder kept
+2. Percept quality -- what a person would have to work with
+     digit_acc           MNIST accuracy of a CNN trained on CLEAN digits
+                         (blurred to the analysis scale) and tested on
+                         the percepts, unchanged. It never sees a percept
+                         in training, so it only scores a percept that
+                         looks like its digit: a proxy for recognition,
+                         not a measure of what the percept encodes
+     fit_loss            the optimiser's final loss on the test digits
      bars_contrast_*     (on - off) / (on + off) of the percept over the
                          bars and gaps of each band of the bars image
      e_discrim           1 - mean pairwise correlation of the percepts of
                          the four tumbling-E orientations
-     pearson_r, ssim,    percept vs stimulus, both blurred to a common
-     mse_norm            analysis scale, inside the covered region only,
-                         averaged over the bars, E and shapes images.
-                         mse_norm uses max-normalised images: it is a
-                         secondary column, for the reasons pearson_r and
-                         ssim are the primary ones
-3. Sensitivity
-     the table itself: how far each condition moves each metric away
-     from the baseline row.
+     pearson_r, ssim,    percept vs image, both blurred to the analysis
+     mse_norm            scale, inside the covered region, averaged over
+                         the bars, E and shapes images
+3. The stimulation the optimiser chose (test digits)
+     frac_active         fraction of electrodes driven above the rheobase
+     current_active_ua   mean current of those electrodes
+     frac_at_limit       fraction at 99% of the safety limit or more
 
 The threshold noise is the model's only stochastic element, so every
 metric is computed `--repeats` times, each with a fresh threshold draw
-(and a fresh CNN initialisation). The draws are seeded by repeat index,
-so condition A's repeat k and condition B's repeat k use the same
-standard-normal draw: the comparison is paired.
+(and a fresh classifier initialisation). The draws are seeded by repeat
+index, so condition A's repeat k and condition B's repeat k use the same
+standard-normal draw: the comparison is paired. Stimulation is
+re-optimised for every draw.
 
-A reference row, `ideal_input`, trains the same decoders on the digit
-images themselves, pooled to the same grid: the ceiling for any
-condition. Chance is 0.10.
+A reference row, `ideal_input`, scores the classifier on the clean test
+digits: the ceiling for digit_acc. Chance is 0.10.
 
 Output (default examples/out/compare_params/):
     metrics.csv        mean and sd per condition
     metrics_raw.csv    one row per condition and repeat
     summary.png        one panel per metric, conditions against baseline
     examples.png       what each condition's percepts look like
+    checkpoints/       every finished repeat of every condition, and the
+                       trained classifiers
+
+Checkpoints make a run resumable: if it stops (a crash, a CUDA error
+after the laptop slept), rerun the same command with --resume and only
+the unfinished repeats are computed. Draws and classifier seeds are
+fixed by index, so a resumed run gives the numbers an uninterrupted one
+would. --resume refuses checkpoints written with different settings or
+a different config, and a run into a folder that already holds
+checkpoints must say --resume or --fresh, so finished work is never
+discarded by accident.
 
 Usage::
 
     python examples/compare_params.py --quick           # smoke test
     python examples/compare_params.py                   # all conditions
     python examples/compare_params.py --conditions baseline,K_x2
+    python examples/compare_params.py --resume          # after a stop
+
+Optimisation dominates the run time: ~0.8 s per image on an RTX 4060
+Laptop GPU at the default 60 steps, so about 20 minutes per condition
+at the defaults. --n-test and --repeats trade precision for time.
 
 MNIST is read from data/MNIST/ as the four original .gz files. Pass
 --download to fetch them there (~11.6 MB) if they are missing.
 
-The operating point is --max-current-ua (default 60 uA), NOT the
-shipped `sampling.stimulus_scale` of 100 uA. At 100 uA with 100
-electrodes the percepts clamp to one white blob and every condition
-looks the same (bar contrast ~0 in every band), so the parameters
-under test would have nothing to act on. `stim_100ua` keeps the shipped
-value in the table as its own condition.
-
-NOTE `current_spread.aggregation` is not in the default conditions: the
-simulator's forward pass does not call `aggregate_activation`, so
-sweeping it would show no effect at all.
+NOTE `sampling.*` has no effect here: the optimiser, not receptive-field
+sampling, turns images into amplitudes. `current_spread.aggregation` is
+not a condition either: the forward pass does not call
+`aggregate_activation`, so sweeping it would show no effect at all.
 """
 from __future__ import annotations
 
@@ -76,7 +114,9 @@ import argparse
 import copy
 import gzip
 import itertools
+import json
 import os
+import shutil
 import sys
 import time
 import urllib.request
@@ -94,9 +134,10 @@ from torch import nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dynaphos.utils import load_params                              # noqa: E402
+from dynaphos.utils import load_params, set_deterministic           # noqa: E402
 from dynaphos_lgn.build import build_simulator                      # noqa: E402
 from dynaphos_lgn.params import require                             # noqa: E402
+from dynaphos_lgn.simulator import LGNPhospheneSimulator            # noqa: E402
 from examples.make_test_image import (BAR_BANDS, X_MAX, X_MIN,      # noqa: E402
                                       coordinate_grid, pattern_bars,
                                       pattern_e, pattern_shapes)
@@ -109,8 +150,8 @@ REPO = Path(__file__).resolve().parents[1]
 CONDITIONS = {
     'baseline': {},
     # K is transplanted from macaque V1; halve and double it.
-    'K_x0.5': {'current_spread.k_ua_per_mm2': 337.5},
-    'K_x2': {'current_spread.k_ua_per_mm2': 1350.0},
+    #'K_x0.5': {'current_spread.k_ua_per_mm2': 337.5},
+    # 'K_x2': {'current_spread.k_ua_per_mm2': 1350.0},
     'bosking_spread': {'current_spread.spread_model': 'bosking'},
     # The four magnification models (baseline is 'jacobian').
     'mag_atlas_gradient': {'magnification.model': 'atlas_gradient'},
@@ -119,10 +160,6 @@ CONDITIONS = {
     # Threshold form.
     'hard_threshold': {'thresholding.soft_threshold': False},
     'soft_no_baseline': {'thresholding.soft_threshold_baseline': 'none'},
-    # Encoder: nearest pixel instead of the receptive-field centre.
-    'center_sampling': {'sampling.sampling_method': 'center'},
-    # The shipped operating point. Saturates: see --max-current-ua.
-    'stim_100ua': {'sampling.stimulus_scale': 1.0e-4},
 }
 # -------------------------------------------------------------------------
 
@@ -139,13 +176,20 @@ MNIST_FILES = {'train_images': 'train-images-idx3-ubyte.gz',
 DIGIT_CENTER_DEG = (3.25, 0.0)
 E_CENTER_DEG = (3.1, 0.0)     # centre of make_test_image's E
 
-# Analysis scale. Percepts and stimuli are blurred by ANALYSIS_BLUR_DEG
-# before being compared, and pooled to ANALYSIS_PIXEL_DEG for decoding
-# and image metrics. Fixed across conditions, never derived from them.
+# Analysis scale. Percepts and images are blurred by ANALYSIS_BLUR_DEG
+# before being compared, and pooled to ANALYSIS_PIXEL_DEG for the loss,
+# the classifier and the image metrics. Fixed across conditions, never
+# derived from them.
 ANALYSIS_BLUR_DEG = 0.5
 ANALYSIS_PIXEL_DEG = 0.25
 SSIM_WINDOW_SIGMA_PX = 1.5
 CHANCE = 0.1
+
+# Where the optimiser starts, as a fraction of the way from the rheobase
+# to the safety limit (~31 uA for 100 uA). Measured on MNIST: starting
+# at the rheobase or below leaves electrodes stuck without gradient, and
+# starting at half the limit converges more slowly to a worse fit.
+START_FRACTION = 0.1
 
 # Reading off a detection threshold.
 THRESHOLD_SWEEP_UA = np.arange(1.0, 201.0, 1.0)
@@ -170,8 +214,6 @@ def base_params(args) -> dict:
     params['atlas']['hemispheres'] = ['left']
     params['electrodes']['n_electrodes'] = args.n_electrodes
     params['electrodes']['max_eccentricity_deg'] = args.max_ecc
-    params['sampling']['stimulus_scale'] = (
-        args.max_current_ua / require(params, 'run.current_unit_to_ua'))
     return params
 
 
@@ -185,6 +227,69 @@ def apply_overrides(params: dict, overrides: dict) -> dict:
             node = node[key]
         node[leaf] = value
     return params
+
+
+# -------------------------------------------------------------------------
+# Checkpoints
+# -------------------------------------------------------------------------
+def differences(a, b, prefix='') -> list:
+    """Dotted paths at which two JSON-like values differ."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        return [path for key in sorted(set(a) | set(b))
+                for path in differences(a.get(key), b.get(key),
+                                        f'{prefix}{key}.')]
+    return [] if a == b else [prefix.rstrip('.')]
+
+
+class Checkpoints:
+    """One file per finished unit of work, under `directory`.
+
+    `run_config` is everything a checkpoint's numbers depend on apart
+    from its condition's overrides, which each checkpoint carries and
+    `run_condition` checks. Resuming against a different run_config is
+    refused rather than mixing numbers from two setups.
+    """
+
+    def __init__(self, directory: Path, run_config: dict, resume: bool,
+                 fresh: bool):
+        self.dir = directory
+        run_config = json.loads(json.dumps(run_config))   # as it reloads
+        existing = list(directory.glob('*.pt')) if directory.exists() else []
+        if existing and not (resume or fresh):
+            sys.exit(f"{directory} holds {len(existing)} checkpoints from an "
+                     f"earlier run. Pass --resume to continue it, or --fresh "
+                     f"to discard them and start over.")
+        if fresh:
+            shutil.rmtree(directory, ignore_errors=True)
+        directory.mkdir(parents=True, exist_ok=True)
+        config_path = directory / 'run_config.json'
+        if resume and existing and config_path.exists():
+            changed = differences(json.loads(config_path.read_text()),
+                                  run_config)
+            if changed:
+                sys.exit(f"Cannot resume: the checkpoints in {directory} "
+                         f"were written with different settings "
+                         f"({', '.join(changed)}). Rerun with the same "
+                         f"settings, or pass --fresh to start over.")
+        if resume:
+            print(f"resuming from {len(existing)} checkpoints in {directory}")
+        config_path.write_text(json.dumps(run_config, indent=1,
+                                          sort_keys=True))
+
+    def _path(self, name: str) -> Path:
+        return self.dir / f'{name}.pt'
+
+    def load(self, name: str):
+        path = self._path(name)
+        return (torch.load(path, map_location='cpu', weights_only=False)
+                if path.exists() else None)
+
+    def save(self, name: str, obj):
+        """Write-then-rename, so a stop mid-write leaves no half file."""
+        path = self._path(name)
+        partial = path.with_name(path.name + '.partial')
+        torch.save(obj, partial)
+        os.replace(partial, path)
 
 
 # -------------------------------------------------------------------------
@@ -239,10 +344,13 @@ def place_digits(digits, X: np.ndarray, Y: np.ndarray, digit_deg: float,
                          align_corners=False)[:, 0]
 
 
-def placed(digits: torch.Tensor, X, Y, digit_deg, device=None, chunk=256):
-    """Yield placed (H, W) digit images one at a time."""
-    for part in digits.split(chunk):
-        yield from place_digits(part, X, Y, digit_deg, device)
+def clean_digits(digits: torch.Tensor, X, Y, digit_deg, grid, device=None,
+                 chunk=256) -> torch.Tensor:
+    """The digits as the classifier sees them: placed, blurred and
+    pooled to the analysis grid, (N, h, w)."""
+    return torch.cat([grid.pool_blurred(place_digits(part, X, Y, digit_deg,
+                                                     device))
+                      for part in digits.split(chunk)])
 
 
 # -------------------------------------------------------------------------
@@ -266,7 +374,7 @@ def test_images(X, Y, device=None) -> dict:
 
 
 # -------------------------------------------------------------------------
-# Rendering
+# Optimised stimulation
 # -------------------------------------------------------------------------
 def threshold_draws(simulator, repeats: int) -> list:
     """One per-electrode threshold tensor per repeat, seeded by index, so
@@ -279,36 +387,105 @@ def threshold_draws(simulator, repeats: int) -> list:
     return draws
 
 
-@torch.no_grad()
-def render(simulator, image: torch.Tensor, thresholds: list):
-    """Percepts of one static image, one frame from rest, for each
-    threshold draw -> ((R, H, W) percepts, (n,) amplitudes).
+class Stimulator:
+    """Finds, per image, the amplitudes whose percept best matches it.
 
-    The thresholds only gate intensity, so the costly spatial maps are
-    rendered once and reused across draws. This is `simulator(...)`
-    written out; `check_render` confirms the two agree.
+    Runs on its own batched copy of the simulator, sharing the electrode
+    array, so `batch` images are optimised side by side. Adam scales
+    every amplitude's step separately, so images in one batch do not
+    influence each other.
     """
-    simulator.reset()
-    amplitude = simulator.sample_stimulus(image, rescale=True)
-    simulator.update(amplitude)
-    field = simulator.brightness.get() * simulator.spatial_activation()
-    percepts = []
-    for threshold in thresholds:
-        simulator.threshold.state = threshold
-        percepts.append(torch.sum(simulator.detection_probability() * field,
-                                  dim=0).clamp(0, 1))
-    return torch.stack(percepts), amplitude.flatten()
+
+    def __init__(self, simulator, params, grid, args):
+        self.sim = LGNPhospheneSimulator(
+            apply_overrides(params, {'run.batch_size': args.batch}),
+            simulator.array, rng=np.random.default_rng(0))
+        self.unit = require(params, 'run.current_unit_to_ua')
+        self.limit = self.sim.safety_limit_ua / self.unit
+        self.rheobase = require(params, 'thresholding.rheobase')
+        if self.limit <= self.rheobase:
+            sys.exit(f"default_stim.safety_limit_ua "
+                     f"({self.sim.safety_limit_ua} uA) is at or below the "
+                     f"rheobase ({self.rheobase * self.unit} uA): no "
+                     f"permitted current delivers any charge.")
+        self.start = (self.rheobase
+                      + START_FRACTION * (self.limit - self.rheobase))
+        self.grid = grid
+        self.mask = grid.mask.to(torch.float32)
+        self.batch, self.steps, self.lr = args.batch, args.steps, args.lr
+
+    @property
+    def limit_ua(self) -> float:
+        return self.sim.safety_limit_ua
+
+    def percept(self, amplitude: torch.Tensor) -> torch.Tensor:
+        """One frame from rest, not yet clamped -> (batch, H, W)."""
+        self.sim.reset()
+        self.sim.update(amplitude)
+        return self.sim.unclamped_percept()
+
+    def loss(self, percept: torch.Tensor, wanted: torch.Tensor):
+        """Per-image masked MSE on the analysis grid -> (batch,)."""
+        diff = (self.grid.pool_blurred(percept) - wanted) ** 2
+        return (diff * self.mask).sum((-2, -1)) / self.mask.sum()
+
+    def __call__(self, images: torch.Tensor, threshold: torch.Tensor):
+        """(N, H, W) images -> (clamped percepts (N, H, W), amplitudes in
+        uA (N, n), final loss (N,))."""
+        parts = [self._optimise(part, threshold)
+                 for part in images.split(self.batch)]
+        return tuple(torch.cat(p) for p in zip(*parts))
+
+    def _optimise(self, images: torch.Tensor, threshold: torch.Tensor):
+        n_images = len(images)
+        if n_images < self.batch:        # the batched simulator's size is
+            images = torch.cat([images, images[-1:].expand(   # fixed: pad
+                self.batch - n_images, -1, -1)])
+        sim = self.sim
+        sim.threshold.state = threshold
+        wanted = self.grid.pool_blurred(images)
+
+        hard = not sim.soft_threshold
+        baseline = sim.soft_threshold_baseline
+        if hard:                         # optimise the logistic surrogate
+            sim.soft_threshold, sim.soft_threshold_baseline = True, 'none'
+        z = torch.full((self.batch, sim.num_phosphenes),
+                       self.start / self.limit, **sim.data_kwargs)
+        z = torch.logit(z).requires_grad_(True)
+        optimiser = torch.optim.Adam([z], lr=self.lr)
+        for _ in range(self.steps):
+            optimiser.zero_grad()
+            amplitude = self.limit * torch.sigmoid(z)
+            self.loss(self.percept(amplitude), wanted).sum().backward()
+            optimiser.step()
+        sim.soft_threshold, sim.soft_threshold_baseline = not hard, baseline
+
+        with torch.no_grad():
+            amplitude = self.limit * torch.sigmoid(z)
+            amplitude = torch.where(amplitude > self.rheobase, amplitude,
+                                    torch.zeros_like(amplitude))
+            percept = self.percept(amplitude).clamp(0, 1)
+            loss = self.loss(percept, wanted)
+        return (percept[:n_images], amplitude[:n_images] * self.unit,
+                loss[:n_images])
 
 
 @torch.no_grad()
-def check_render(simulator, image, thresholds):
-    fast, _ = render(simulator, image, thresholds[:1])
+def check_batched(simulator, stimulator, threshold):
+    """The batched copy must render row by row what the simulator itself
+    renders for the same amplitudes."""
+    generator = torch.Generator().manual_seed(0)
+    amplitude = (torch.rand(stimulator.batch, simulator.num_phosphenes,
+                            generator=generator)
+                 * stimulator.limit).to(**simulator.data_kwargs)
+    stimulator.sim.threshold.state = threshold
+    batched = stimulator.percept(amplitude).clamp(0, 1)
     simulator.reset()
-    simulator.threshold.state = thresholds[0]
-    slow = simulator(simulator.sample_stimulus(image, rescale=True))
-    if not torch.allclose(fast[0], slow, atol=1e-5):
-        raise RuntimeError("render() no longer matches simulator(); the "
-                           "simulator's forward pass has changed.")
+    simulator.threshold.state = threshold
+    single = simulator(amplitude[0])
+    if not torch.allclose(batched[0], single, atol=1e-5):
+        raise RuntimeError("The batched simulator no longer matches the "
+                           "unbatched one.")
 
 
 # -------------------------------------------------------------------------
@@ -430,6 +607,16 @@ def test_image_metrics(percepts: dict, images: dict, grid: AnalysisGrid,
     return out
 
 
+def stimulation_metrics(amplitudes_ua: torch.Tensor, limit_ua: float
+                        ) -> dict:
+    active = amplitudes_ua > 0
+    return {'frac_active': float(active.float().mean()),
+            'current_active_ua': (float(amplitudes_ua[active].mean())
+                                  if active.any() else 0.0),
+            'frac_at_limit': float((amplitudes_ua >= 0.99 * limit_ua)
+                                   .float().mean())}
+
+
 # -------------------------------------------------------------------------
 # Benchmarks
 # -------------------------------------------------------------------------
@@ -489,31 +676,15 @@ def crossing(x: np.ndarray, p: np.ndarray, level: float) -> np.ndarray:
 
 
 # -------------------------------------------------------------------------
-# Decoders
+# Digit classifier
 # -------------------------------------------------------------------------
-def standardise(train: torch.Tensor, test: torch.Tensor, per_feature: bool):
-    dims = 0 if per_feature else None
-    mean = train.mean(dim=dims) if dims is not None else train.mean()
-    std = train.std(dim=dims) if dims is not None else train.std()
-    std = torch.clamp(std, min=1e-6)
-    return (train - mean) / std, (test - mean) / std
-
-
-def linear_probe(x_train, y_train, x_test, y_test, steps=300) -> float:
-    """Multinomial logistic regression, full batch, zero init."""
-    x_train, x_test = standardise(x_train.flatten(1), x_test.flatten(1),
-                                  per_feature=True)
-    model = nn.Linear(x_train.shape[1], 10).to(x_train.device)
-    nn.init.zeros_(model.weight)
-    nn.init.zeros_(model.bias)
-    optimiser = torch.optim.Adam(model.parameters(), lr=0.02,
-                                 weight_decay=1e-4)
-    for _ in range(steps):
-        optimiser.zero_grad()
-        F.cross_entropy(model(x_train), y_train).backward()
-        optimiser.step()
-    with torch.no_grad():
-        return float((model(x_test).argmax(1) == y_test).float().mean())
+def standardise(images: torch.Tensor) -> torch.Tensor:
+    """Per image: zero mean, unit sd. Removes overall brightness, which
+    a viewer adapts to and the optimiser does not control freely."""
+    flat = images.flatten(1)
+    flat = ((flat - flat.mean(1, keepdim=True))
+            / flat.std(1, keepdim=True).clamp(min=1e-6))
+    return flat.view_as(images)[:, None]
 
 
 class SmallCNN(nn.Module):
@@ -528,15 +699,34 @@ class SmallCNN(nn.Module):
         return self.head(self.features(x).flatten(1))
 
 
-def cnn(x_train, y_train, x_test, y_test, seed, epochs) -> float:
+def classifiers_for(data, args, checkpoints) -> list:
+    """One classifier per repeat, loaded from its checkpoint if there is
+    one: retraining is fast but on CUDA not bit-for-bit repeatable."""
+    models = []
+    for r in range(args.repeats):
+        state = checkpoints.load(f'classifier_r{r}')
+        if state is None:
+            model = train_classifier(data['train_clean'],
+                                     data['train_labels'], seed=r,
+                                     epochs=args.epochs)
+            checkpoints.save(f'classifier_r{r}', model.state_dict())
+        else:
+            model = SmallCNN(*data['train_clean'].shape[-2:]).to(args.device)
+            model.load_state_dict(state)
+            model.eval()
+        models.append(model)
+    return models
+
+
+def train_classifier(x_train, y_train, seed, epochs) -> SmallCNN:
+    """A CNN on clean digits only; it never sees a percept."""
     torch.manual_seed(seed)
-    x_train, x_test = standardise(x_train, x_test, per_feature=False)
-    x_train, x_test = x_train[:, None], x_test[:, None]
+    x_train = standardise(x_train)
     model = SmallCNN(*x_train.shape[-2:]).to(x_train.device)
     optimiser = torch.optim.Adam(model.parameters(), lr=1e-3)
     generator = torch.Generator().manual_seed(seed)
+    model.train()
     for _ in range(epochs):
-        model.train()
         order = torch.randperm(len(x_train), generator=generator).to(
             x_train.device)
         for batch in order.split(64):
@@ -544,78 +734,95 @@ def cnn(x_train, y_train, x_test, y_test, seed, epochs) -> float:
             F.cross_entropy(model(x_train[batch]), y_train[batch]).backward()
             optimiser.step()
     model.eval()
-    with torch.no_grad():
-        return float((model(x_test).argmax(1) == y_test).float().mean())
+    return model
+
+
+@torch.no_grad()
+def accuracy(model, images, labels) -> float:
+    return float((model(standardise(images)).argmax(1) == labels)
+                 .float().mean())
 
 
 # -------------------------------------------------------------------------
 # One condition
 # -------------------------------------------------------------------------
-def run_condition(name, params, data, images, grid, X, Y, args,
-                  reference_xy):
+def run_condition(name, params, data, images, classifiers, grid, X, Y, args,
+                  reference_xy, checkpoints):
+    """Every repeat of one condition, each checkpointed as it finishes;
+    repeats already checkpointed are loaded instead of recomputed."""
     t0 = time.time()
-    simulator, _ = build_simulator(
-        params, atlas_dir=str(REPO / require(params, 'atlas.directory')))
-    thresholds = threshold_draws(simulator, args.repeats)
-    check_render(simulator, images['shapes'], thresholds)
+    overrides = CONDITIONS[name]
+    saved = [checkpoints.load(f'{name}__r{r}') for r in range(args.repeats)]
+    for s in saved:
+        if s is not None and s['overrides'] != overrides:
+            sys.exit(f"Cannot resume {name!r}: its checkpoints were written "
+                     f"with overrides {s['overrides']}, CONDITIONS now says "
+                     f"{overrides}. Pass --fresh to start over.")
+    rows = [s and s['row'] for s in saved]
+    examples = saved[0] and saved[0]['examples']
+    xy = next((s['xy'] for s in saved if s is not None), None)
+    missing = [r for r, s in enumerate(saved) if s is None]
+    if len(missing) < args.repeats:
+        print(f"  {name:<22} {args.repeats - len(missing)} of "
+              f"{args.repeats} repeats from checkpoints")
 
-    xy = simulator.array.vf_xy
+    if missing:
+        simulator, _ = build_simulator(
+            params, atlas_dir=str(REPO / require(params, 'atlas.directory')))
+        stimulator = Stimulator(simulator, params, grid, args)
+        thresholds = threshold_draws(simulator, args.repeats)
+        check_batched(simulator, stimulator, thresholds[0])
+        xy = simulator.array.vf_xy
+        benchmarks = benchmark_metrics(simulator, params, thresholds)
+    for r in missing:
+        row = rows[r] = {'condition': name, 'repeat': r, **benchmarks[r]}
+        threshold = thresholds[r]
+        names = list(images)
+        stacked = torch.stack([images[k] for k in names])
+        percepts = dict(zip(names, stimulator(stacked, threshold)[0]))
+        row.update(test_image_metrics(percepts, images, grid, X, Y))
+
+        pooled, amplitudes, losses = [], [], []
+        for part in data['test_digits'].split(args.batch):
+            p, a, loss = stimulator(
+                place_digits(part, X, Y, args.digit_deg, args.device),
+                threshold)
+            pooled.append(grid.pool_blurred(p))
+            amplitudes.append(a)
+            losses.append(loss)
+            if r == 0 and 'digit' not in percepts:
+                percepts['digit'] = p[0]
+        row['digit_acc'] = accuracy(classifiers[r], torch.cat(pooled),
+                                    data['test_labels'])
+        row['fit_loss'] = float(torch.cat(losses).mean())
+        row.update(stimulation_metrics(torch.cat(amplitudes),
+                                       stimulator.limit_ua))
+        row['n_electrodes'] = simulator.num_phosphenes
+        if r == 0:
+            examples = {k: v.cpu() for k, v in percepts.items()}
+        checkpoints.save(f'{name}__r{r}', {
+            'overrides': overrides, 'row': row, 'xy': xy,
+            'examples': examples if r == 0 else None})
+        print(f"  {name:<22} repeat {r + 1}/{args.repeats}  "
+              f"{time.time() - t0:7.1f} s   digit_acc {row['digit_acc']:.3f}"
+              f"   active {row['frac_active']:.2f} at "
+              f"{row['current_active_ua']:.1f} uA")
+
+    # Against the reference as it stands in this run, so loaded and
+    # fresh repeats are judged the same way.
     same = (reference_xy is None
             or (xy.shape == reference_xy.shape
                 and np.allclose(xy, reference_xy, equal_nan=True)))
-    unsampled = int((simulator.sampling_mask.flatten(1).sum(1) == 0).sum())
-
-    rows = [{'condition': name, 'repeat': r} for r in range(args.repeats)]
-    for row, bench in zip(rows, benchmark_metrics(simulator, params,
-                                                  thresholds)):
-        row.update(bench)
-
-    rendered = {k: render(simulator, v, thresholds)[0]
-                for k, v in images.items()}
-    for r, row in enumerate(rows):
-        row.update(test_image_metrics({k: v[r] for k, v in rendered.items()},
-                                      images, grid, X, Y))
-
-    decoded = {}
-    for split in ('train', 'test'):
-        percepts, amplitudes = [], []
-        for image in placed(data[f'{split}_digits'], X, Y, args.digit_deg,
-                            args.device):
-            p, a = render(simulator, image, thresholds)
-            percepts.append(grid.pool_plain(p))
-            amplitudes.append(a)
-        decoded[split] = (torch.stack(percepts, dim=1),     # (R, N, h, w)
-                          torch.stack(amplitudes))          # (N, n)
-    y_train, y_test = data['train_labels'], data['test_labels']
-    acc_amps = linear_probe(decoded['train'][1], y_train,
-                            decoded['test'][1], y_test)
-    for r, row in enumerate(rows):
-        x_train, x_test = decoded['train'][0][r], decoded['test'][0][r]
-        row['acc_linear'] = linear_probe(x_train, y_train, x_test, y_test)
-        row['acc_cnn'] = cnn(x_train, y_train, x_test, y_test, seed=r,
-                             epochs=args.epochs)
-        row['acc_linear_amps'] = acc_amps
-        row['n_electrodes'] = simulator.num_phosphenes
-        row['n_unsampled_electrodes'] = unsampled
+    for row in rows:
         row['same_electrodes'] = same
-
-    examples = {k: v[0] for k, v in rendered.items()}
-    examples['digit'] = render(simulator, data['example_digit'],
-                               thresholds[:1])[0][0]
-    print(f"  {name:<22} {time.time() - t0:6.1f} s   "
-          f"acc_cnn {np.mean([r['acc_cnn'] for r in rows]):.3f}   "
-          f"threshold {rows[0]['threshold_ua']:.1f} uA")
     return rows, examples, xy
 
 
-def ideal_rows(data, grid, args) -> list:
-    """The same decoders on the digit images: the ceiling."""
-    x_train, x_test = data['train_ideal'], data['test_ideal']
-    y_train, y_test = data['train_labels'], data['test_labels']
-    linear = linear_probe(x_train, y_train, x_test, y_test)
-    return [{'condition': 'ideal_input', 'repeat': r, 'acc_linear': linear,
-             'acc_cnn': cnn(x_train, y_train, x_test, y_test, seed=r,
-                            epochs=args.epochs)}
+def ideal_rows(data, classifiers, args) -> list:
+    """The classifier on the clean test digits: the ceiling."""
+    return [{'condition': 'ideal_input', 'repeat': r,
+             'digit_acc': accuracy(classifiers[r], data['test_clean'],
+                                   data['test_labels'])}
             for r in range(args.repeats)]
 
 
@@ -623,19 +830,19 @@ def ideal_rows(data, grid, args) -> list:
 # Figures
 # -------------------------------------------------------------------------
 SUMMARY_PANELS = [
-    ('acc_cnn', 'MNIST accuracy, CNN'),
-    ('acc_linear', 'MNIST accuracy, linear probe'),
-    ('acc_linear_amps', 'Accuracy from amplitudes (encoder only)'),
-    ('pearson_r', 'Percept vs stimulus, Pearson r'),
-    ('ssim', 'Percept vs stimulus, SSIM'),
+    ('digit_acc', 'Digit accuracy, classifier trained on clean digits'),
+    ('ssim', 'Percept vs image, SSIM'),
     ('e_discrim', 'Tumbling-E discriminability'),
+    ('bars_contrast_1.2deg', 'Bar contrast, 1.2 deg band'),
     ('bars_contrast_0.6deg', 'Bar contrast, 0.6 deg band'),
+    ('fit_loss', 'Optimiser loss on digits (lower is better)'),
+    ('current_active_ua', 'Mean current of active electrodes (uA)'),
     ('threshold_ua', 'Detection threshold (uA)'),
     ('sigma_deg_100ua', 'Phosphene sigma at 100 uA (deg)'),
 ]
 
 
-def plot_summary(summary: pd.DataFrame, path: Path):
+def plot_summary(summary: pd.DataFrame, path: Path, limit_ua: float):
     import matplotlib
     matplotlib.use('Agg')
     from matplotlib import pyplot as plt
@@ -655,12 +862,16 @@ def plot_summary(summary: pd.DataFrame, path: Path):
                        lw=0)
             ax.text(40, y.max() + 0.6, 'Pezaris & Reid 40 ± 12',
                     color=INK_SECONDARY, fontsize=7, ha='center')
-        if metric in ('acc_cnn', 'acc_linear', 'acc_linear_amps'):
+        if metric == 'current_active_ua':
+            ax.axvline(limit_ua, color=REFERENCE_GREY, lw=1, ls=':')
+            ax.text(limit_ua, y.max() + 0.6, 'safety limit',
+                    color=INK_SECONDARY, fontsize=7, ha='right')
+        if metric == 'digit_acc':
             ax.axvline(CHANCE, color=REFERENCE_GREY, lw=1, ls=':')
-            if metric != 'acc_linear_amps' and 'ideal_input' in summary.index:
+            if 'ideal_input' in summary.index:
                 ceiling = summary.loc['ideal_input', (metric, 'mean')]
                 ax.axvline(ceiling, color=REFERENCE_GREY, lw=1, ls=':')
-                ax.text(ceiling, y.max() + 0.6, 'ideal input',
+                ax.text(ceiling, y.max() + 0.6, 'clean digits',
                         color=INK_SECONDARY, fontsize=7, ha='right')
         if 'baseline' in conditions:
             ax.axvline(summary.loc['baseline', (metric, 'mean')],
@@ -676,8 +887,9 @@ def plot_summary(summary: pd.DataFrame, path: Path):
         for side in ('left', 'bottom'):
             ax.spines[side].set_color('#c9c8c3')
     axes[0, 0].set_yticks(y, conditions)
-    fig.suptitle('Parameter comparison: mean ± sd over threshold draws '
-                 '(dashed = baseline, dotted = chance / ceiling)',
+    fig.suptitle('Parameter comparison under optimised stimulation: mean ± '
+                 'sd over threshold draws (dashed = baseline, dotted = '
+                 'chance / ceiling / limit)',
                  fontsize=10, color=INK, x=0.01, ha='left')
     fig.tight_layout()
     fig.savefig(path, dpi=140, facecolor=SURFACE)
@@ -728,40 +940,56 @@ def main(argv=None):
         description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('--conditions', default=None,
                         help='comma-separated subset of CONDITIONS')
-    parser.add_argument('--n-train', type=int, default=2000)
-    parser.add_argument('--n-test', type=int, default=1000)
+    parser.add_argument('--n-train', type=int, default=10000,
+                        help='clean digits the classifier is trained on')
+    parser.add_argument('--n-test', type=int, default=500,
+                        help='test digits, each optimised per repeat')
     parser.add_argument('--repeats', type=int, default=3,
-                        help='threshold draws (and CNN seeds) per condition')
-    parser.add_argument('--epochs', type=int, default=15)
+                        help='threshold draws (and classifier seeds) per '
+                             'condition')
+    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--steps', type=int, default=60,
+                        help='optimiser steps per image')
+    parser.add_argument('--lr', type=float, default=0.2,
+                        help='Adam learning rate on the amplitude logits')
+    parser.add_argument('--batch', type=int, default=16,
+                        help='images optimised side by side (GPU memory: '
+                             '~2.8 GB at 16)')
     parser.add_argument('--n-electrodes', type=int, default=100)
     parser.add_argument('--max-ecc', type=float, default=6.0)
     parser.add_argument('--fps', type=float, default=10,
                         help='one frame = 1/fps s of stimulation')
-    parser.add_argument('--max-current-ua', type=float, default=60.0,
-                        help='current for a white pixel (sets '
-                             'sampling.stimulus_scale). The shipped 100 uA '
-                             'saturates 100 electrodes into one blob')
     parser.add_argument('--digit-deg', type=float, default=5.0,
                         help='size of the 28 px MNIST frame, degrees')
     parser.add_argument('--quick', action='store_true',
-                        help='small smoke-test run: 400/200 digits, '
-                             '2 repeats, 8 epochs')
+                        help='small smoke-test run: 2000/64 digits, '
+                             '2 repeats, 5 epochs, 40 steps')
     parser.add_argument('--device', default='auto',
                         help="'auto' (CUDA if available), 'cpu', 'cuda' "
                              "or 'cuda:N'")
     parser.add_argument('--download', action='store_true',
                         help='fetch MNIST into data/MNIST if missing')
+    restart = parser.add_mutually_exclusive_group()
+    restart.add_argument('--resume', action='store_true',
+                         help='continue from the checkpoints in --out')
+    restart.add_argument('--fresh', action='store_true',
+                         help='discard the checkpoints in --out first')
     parser.add_argument('--out', default=str(REPO / 'examples' / 'out'
                                              / 'compare_params'))
     args = parser.parse_args(argv)
-    if args.quick:
-        args.n_train, args.n_test, args.repeats, args.epochs = 400, 200, 2, 8
+    if args.quick:              # new defaults: explicit flags still win
+        parser.set_defaults(n_train=2000, n_test=64, repeats=2, epochs=5,
+                            steps=40)
+        args = parser.parse_args(argv)
     if args.device == 'auto':
         args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     args.device = torch.device(args.device)
     if args.device.type == 'cuda' and not torch.cuda.is_available():
         sys.exit("CUDA requested but torch.cuda.is_available() is False; "
                  "this torch build is " + torch.__version__)
+    # Before the classifiers are trained, not only once the first
+    # simulator turns it on, so that two runs train identical ones.
+    set_deterministic(0)
 
     names = (list(CONDITIONS) if args.conditions is None
              else [c.strip() for c in args.conditions.split(',')])
@@ -782,28 +1010,41 @@ def main(argv=None):
     mnist = load_mnist(REPO / 'data' / 'MNIST', args.download)
     train_x, train_y, test_x, test_y = mnist_subset(mnist, args.n_train,
                                                     args.n_test)
-    data = {'train_digits': torch.as_tensor(train_x),
-            'test_digits': torch.as_tensor(test_x),
+    data = {'test_digits': torch.as_tensor(test_x),
             'train_labels': torch.as_tensor(train_y, dtype=torch.long,
                                             device=args.device),
             'test_labels': torch.as_tensor(test_y, dtype=torch.long,
                                            device=args.device)}
-    for split in ('train', 'test'):
-        data[f'{split}_ideal'] = torch.stack([
-            grid.pool_plain(image) for image
-            in placed(data[f'{split}_digits'], X, Y, args.digit_deg,
-                      args.device)])
+    for split, digits in (('train', train_x), ('test', test_x)):
+        data[f'{split}_clean'] = clean_digits(
+            torch.as_tensor(digits), X, Y, args.digit_deg, grid, args.device)
     data['example_digit'] = place_digits(test_x[:1], X, Y, args.digit_deg,
                                          args.device)[0]
 
-    print(f"{len(names)} conditions, {args.n_train}/{args.n_test} digits, "
-          f"{args.repeats} repeats, on {args.device}")
-    rows = ideal_rows(data, grid, args)
+    # Everything a checkpoint depends on besides its condition's
+    # overrides. Not --repeats (draw r is the same whatever the count)
+    # nor --conditions (each checkpoint names its own).
+    run_config = {'params': base, 'device': str(args.device),
+                  **{k: getattr(args, k) for k in (
+                      'n_train', 'n_test', 'epochs', 'steps', 'lr', 'batch',
+                      'n_electrodes', 'max_ecc', 'fps', 'digit_deg')}}
+    checkpoints = Checkpoints(out / 'checkpoints', run_config, args.resume,
+                              args.fresh)
+
+    limit_ua = require(base, 'default_stim.safety_limit_ua')
+    print(f"{len(names)} conditions, {args.n_test} test digits, "
+          f"{args.repeats} repeats, {args.steps} steps, safety limit "
+          f"{limit_ua:g} uA, on {args.device}")
+    classifiers = classifiers_for(data, args, checkpoints)
+    rows = ideal_rows(data, classifiers, args)
+    print(f"  classifier on clean digits: "
+          f"{np.mean([r['digit_acc'] for r in rows]):.3f}")
     examples, reference_xy = {}, None
     for name in names:
         params = apply_overrides(base, CONDITIONS[name])
         condition_rows, examples[name], xy = run_condition(
-            name, params, data, images, grid, X, Y, args, reference_xy)
+            name, params, data, images, classifiers, grid, X, Y, args,
+            reference_xy, checkpoints)
         reference_xy = xy if reference_xy is None else reference_xy
         rows.extend(condition_rows)
 
@@ -815,7 +1056,7 @@ def main(argv=None):
     summary = summarise(raw.astype({'condition': str}))
     summary = summary.loc[order]
     summary.to_csv(out / 'metrics.csv')
-    plot_summary(summary, out / 'summary.png')
+    plot_summary(summary, out / 'summary.png', limit_ua)
     plot_examples(examples, images, data['example_digit'], base,
                   out / 'examples.png')
 

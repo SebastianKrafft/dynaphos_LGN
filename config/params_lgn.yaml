@@ -540,6 +540,12 @@ default_stim:
   relative_stim_duration: 1
   pw_default: 170.e-6           # seconds
   freq_default: 300             # Hertz
+  # Largest amplitude any electrode may be driven at. Optimised
+  # stimulation chooses currents at or below it. Like
+  # electrodes.max_current_ua this is a protocol choice: there is no
+  # published safe maximum for LGN microstimulation. It cannot exceed
+  # electrodes.max_current_ua, the current the array is precomputed for.
+  safety_limit_ua: 100.0
   # Chronaxie is NOT a single number for LGN (Tehovnik & Slocum 2009).
   # Short pulses bias towards axonal activation, including axons of
   # passage. A range on purpose.
