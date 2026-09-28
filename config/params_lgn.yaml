@@ -405,10 +405,19 @@ receptive_fields:
     power:                      # rc = a * E^b
       magno: {a_deg: 0.046784, b: 0.473278, r2_log: 0.727}
       parvo: {a_deg: 0.024392, b: 0.399947, r2_log: 0.511}
-    # rs/rc for M and P. Croner & Kaplan report a broad spread; this
-    # median multiplier forces rs to share rc's eccentricity dependence,
-    # which the data does not establish. Flagged assumption.
-    surround_center_radius_ratio: 6.7
+    # rs/rc, split by class. Croner & Kaplan (1995) report a MEAN
+    # (not median) rc/rs of 0.15 for P and 0.21 for M -- a
+    # significant difference (Student's t-test, P=0.014). Reciprocals:
+    # P 1/0.15=6.7, M 1/0.21=4.8. Applying either as a scalar
+    # multiplier still forces rs to share rc's eccentricity
+    # dependence -- C&K's own "no systematic variation with
+    # eccentricity" claim for this ratio is a qualitative read of
+    # their Fig. 4c, not a regression result like the volume ratio's
+    # (slope 0.01, r2=0.1) -- so that part remains a flagged
+    # assumption, split by class or not.
+    surround_center_radius_ratio:
+      parvo: 6.7
+      magno: 4.8
 
   # Xu, Bonds & Casagrande (2002), OWL MONKEY. NO macaque koniocellular
   # RF dataset exists in any form. Owl monkey absolute sizes run ~2x

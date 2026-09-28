@@ -126,10 +126,16 @@ def surround_radius_deg(eccentricity_deg: ArrayLike, params: Mapping,
                         form: str = 'exponential') -> np.ndarray:
     """Receptive-field surround radius rs(E), degrees.
 
-    rs/rc for the M and P classes is
-    ``receptive_fields.croner_kaplan.surround_center_radius_ratio``.
-    Applying it as a scalar multiplier forces rs to share rc's
-    eccentricity dependence, which the data does not establish -- a
+    rs/rc is
+    ``receptive_fields.croner_kaplan.surround_center_radius_ratio``,
+    split by class (parvo 6.7, magno 4.8) -- Croner & Kaplan (1995)
+    found these means significantly different (Student's t-test,
+    P=0.014), so a shared value would misapply parvo's ratio to
+    magno or vice versa. Applying it as a scalar multiplier still
+    forces rs to share rc's eccentricity dependence, which C&K's
+    own "no systematic variation with eccentricity" claim for this
+    ratio does not itself establish -- it is a qualitative read of
+    their Fig. 4c, not a regression result -- so that part remains a
     flagged assumption. The koniocellular
     class ignores it and uses Xu et al.'s own rs(E).
     """
@@ -140,7 +146,7 @@ def surround_radius_deg(eccentricity_deg: ArrayLike, params: Mapping,
         return np.maximum(rs, k['rs_below_15deg'][0])
     surround_center_ratio = require(
         params,
-        'receptive_fields.croner_kaplan.surround_center_radius_ratio')
+        f'receptive_fields.croner_kaplan.surround_center_radius_ratio.{cell_class}')
     return surround_center_ratio * center_radius_deg(
         eccentricity_deg, params, cell_class, form)
 
