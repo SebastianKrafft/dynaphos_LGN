@@ -32,3 +32,6 @@ clips/
 # Independent research
 /dynaphos_lgn/research
 /research/
+
+# MNIST, fetched by examples/compare_params.py
+/data/MNIST/
