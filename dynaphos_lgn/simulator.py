@@ -9,6 +9,7 @@ width and frequency, not electrode positions.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -110,6 +111,8 @@ class LGNPhospheneSimulator:
             params, 'rendering.adaptive_scatter_bandwidth')
 
         rng = np.random.default_rng() if rng is None else rng
+        # Deterministic mode refuses cuBLAS matmuls on CUDA without this
+        os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
         set_deterministic(require(params, 'run.seed'))
         self.deg2pix_coeff = get_deg2pix_coeff(params['run'])
 
@@ -301,6 +304,16 @@ class LGNPhospheneSimulator:
         per_layer_cells = torch.einsum('...nb,nlb->...nl', weights, cells)
         return per_layer_weight, per_layer_cells
 
+    def _as_input(self, x) -> torch.Tensor:
+        """A per-electrode input, or a scalar for all electrodes, on the
+        simulator's device and dtype in its state shape; tensors keep
+        their gradient."""
+        x = (x.to(**self.data_kwargs) if isinstance(x, torch.Tensor)
+             else torch.as_tensor(x, **self.data_kwargs))
+        if x.numel() == 1:
+            return x.reshape(()).expand(self.shape)
+        return x.reshape(self.shape)
+
     def update(self, amplitude: torch.Tensor,
                pulse_width: Optional[torch.Tensor] = None,
                frequency: Optional[torch.Tensor] = None):
@@ -314,10 +327,10 @@ class LGNPhospheneSimulator:
         if frequency is None:
             frequency = self._frequency
 
-        amplitude = amplitude.reshape(self.shape)
+        amplitude = self._as_input(amplitude)
         charge_per_s = self.get_current(amplitude,
-                                        frequency.reshape(self.shape),
-                                        pulse_width.reshape(self.shape))
+                                        self._as_input(frequency),
+                                        self._as_input(pulse_width))
         self.activation.update(charge_per_s)
         self.trace.update(charge_per_s)
 

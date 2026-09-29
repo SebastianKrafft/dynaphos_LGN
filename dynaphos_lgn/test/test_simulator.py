@@ -212,6 +212,24 @@ class TestGradients:
         assert float(pw.grad.abs().sum()) > 0
         assert float(freq.grad.abs().sum()) > 0
 
+    @pytest.mark.skipif(not torch.cuda.is_available(),
+                        reason="Needs CUDA.")
+    def test_cpu_inputs_reach_a_gpu_simulator(self, built, params_override):
+        """CPU stimulation drives a GPU simulator, and the gradient comes
+        back to the CPU inputs."""
+        from dynaphos_lgn.simulator import LGNPhospheneSimulator
+        _, array = built
+        sim = LGNPhospheneSimulator(params_override(run__gpu=0), array,
+                                    rng=np.random.default_rng(0))
+        sim.soft_threshold = True
+        amp = _amp(sim, 70e-6, requires_grad=True)
+        pw = torch.full((sim.num_phosphenes,), 170e-6, requires_grad=True)
+        img = sim(amp, pulse_width=pw, frequency=300.0)
+        assert img.device.type == 'cuda'
+        img.sum().backward()
+        assert float(amp.grad.abs().sum()) > 0
+        assert float(pw.grad.abs().sum()) > 0
+
     def test_hard_threshold_blocks_subthreshold_gradients(self, built):
         """Documented consequence, not a bug: a step function has zero
         gradient on both sides, so a subthreshold electrode can never
