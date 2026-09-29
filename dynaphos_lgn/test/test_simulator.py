@@ -41,18 +41,8 @@ class TestForwardPass:
             assert state[key] is not None, key
 
     def test_repeated_stimulation_rises_then_habituates(self, built):
-        """Under constant stimulation the percept first BUILDS (the
-        leaky integrator charging up over the first few frames) and only
-        then fades, as the memory trace raises the leak current.
-
-        Comparing frame 1 against frame 40 would therefore get the sign
-        of the effect wrong -- frame 1 is on the rising edge, not at the
-        peak. The real signature is a peak a handful of frames in,
-        followed by a sustained decline. Inherited unchanged from the V1
-        model; there is no LGN evidence either way about duty-cycle
-        response, or about whether a single exponential decay is
-        adequate given relay cells' burst/tonic switching.
-        """
+        """Under constant stimulation the percept first builds, peaks a few
+        frames in, and then fades."""
         sim, _ = built
         sim.reset()
         trace = [float(sim(_amp(sim, 90e-6)).sum()) for _ in range(300)]
@@ -260,14 +250,7 @@ class TestGradients:
         assert soft > hard
 
     def test_soft_threshold_renders_nothing_at_zero_amplitude(self, built):
-        """A silent electrode must render nothing, soft gate or not.
-
-        The raw logistic does not satisfy this: the threshold sits only
-        `mu/sd = 1.36` slope-widths above zero activation, so a silent
-        electrode gets p(detect) ~ 0.2 and the array glows. The
-        baseline correction is what buys the invariant back -- see
-        `thresholding.soft_threshold_baseline`.
-        """
+        """A silent electrode must render nothing, soft gate or not."""
         sim, _ = built
         assert sim.soft_threshold, (
             "this test is about the SOFT gate; the config default "

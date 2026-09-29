@@ -60,14 +60,8 @@ def params_override(lgn_params):
 
 @pytest.fixture(scope='session')
 def real_atlas(lgn_params):
-    """The real Erwin atlas, for the few tests that need real biology
-    rather than working code.
-
-    Session-scoped: loading the four .DAT files costs a couple of
-    seconds and ~350 MB, so it should happen once. Tests using this must
-    carry `@requires_real_atlas` so the suite still passes on a checkout
-    without the data.
-    """
+    """The real Erwin atlas, loaded once. Tests using it must carry
+    `@requires_real_atlas`."""
     if not REAL_ATLAS_AVAILABLE:
         pytest.skip(f"Real Erwin atlas not found in {REAL_ATLAS_DIR}.")
     from dynaphos_lgn.atlas import ErwinAtlas

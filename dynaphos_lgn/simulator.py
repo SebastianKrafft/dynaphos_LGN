@@ -1,16 +1,10 @@
-"""End-to-end differentiable phosphene simulator for LGN stimulation.
+"""Differentiable phosphene simulator for LGN stimulation.
 
-Same shape as Dynaphos's V1 simulator -- stimulation parameters in, a
-rendered percept out, with a leaky-integrator state between frames -- so
-an encoder trained against one can be pointed at the other. The
-temporal-dynamics, thresholding and brightness machinery is imported
-from `dynaphos.simulator` unchanged; what is new here is spatial:
-recruitment over real atlas voxels, grouped by layer, with phosphene
-geometry from the atlas's local Jacobian.
-
-Gradients reach amplitude, pulse width and frequency through the image,
-the recruitment weights and the activation state -- never through voxel
-positions or layer labels, which are fixed buffers.
+Same interface as Dynaphos's V1 simulator, whose temporal dynamics,
+thresholding and brightness classes it reuses. What is LGN-specific is
+spatial: recruitment over atlas voxels, grouped by layer, and phosphene
+geometry from the local magnification. Gradients reach amplitude, pulse
+width and frequency, not electrode positions.
 """
 from __future__ import annotations
 
@@ -29,15 +23,13 @@ from dynaphos_lgn.current_spread import RecruitmentKernel
 from dynaphos_lgn.electrodes import LGNElectrodeArray
 from dynaphos_lgn.params import ParameterError, optional, require
 from dynaphos_lgn.receptive_fields import center_radius_deg
-from dynaphos_lgn.rendering import EllipseGaussianRenderer, ScatterRenderer
+from dynaphos_lgn.rendering import (EllipseGaussianRenderer, ScatterRenderer,
+                                    visual_field_grid)
 
 
 class LGNSize:
-    """Phosphene sigmas in degrees, from current via the local Jacobian.
-
-    Its own class so the size model stays swappable: anything exposing
-    `update` and `get` can replace it.
-    """
+    """Phosphene sigmas in degrees, from current via the local
+    magnification. Anything with `update` and `get` can replace it."""
 
     def __init__(self, shape: Tuple[int, ...],
                  kernel: RecruitmentKernel,
@@ -51,12 +43,7 @@ class LGNSize:
         major = np.asarray(major_deg_per_mm, dtype=float).ravel()
         minor = np.asarray(minor_deg_per_mm, dtype=float).ravel()
 
-        # A non-finite magnification means the atlas has no usable
-        # Jacobian at that electrode's voxel. Zeroing it is the only
-        # fallback that does not invent a magnification the atlas never
-        # measured -- but a zero sigma renders an invisible phosphene,
-        # so the electrode drops out of the percept entirely. Say so
-        # rather than letting it vanish, and keep the mask queryable.
+        # No usable magnification: render at zero size, and say so.
         self.no_magnification = ~(np.isfinite(major) & np.isfinite(minor))
         n_bad = int(self.no_magnification.sum())
         if n_bad:
@@ -96,21 +83,12 @@ class LGNSize:
 class LGNPhospheneSimulator:
     """Differentiable LGN phosphene simulator.
 
-    :param params: Dynaphos-style nested parameter dict. See
-        `config/params_lgn.yaml` for the LGN defaults and what each
-        block is grounded in.
+    :param params: Nested parameter dict, see `config/params_lgn.yaml`.
     :param electrode_array: A built `LGNElectrodeArray`.
     :param rng: Numpy generator, used for threshold initialisation.
 
-    `rendering.adaptive_scatter_bandwidth` decides whether the scatter
-    splat bandwidth is recomputed from the live recruitment weights each
-    frame, instead of using the precomputed floor. It costs little and
-    matters at low amplitudes, where only a tight cluster of voxels is
-    active.
-
-    `default_stim.safety_limit_ua` is exposed as `safety_limit_ua`, for
-    whatever chooses the amplitudes to stay under. The forward pass does
-    not clamp to it: model characterisation deliberately sweeps past it.
+    `safety_limit_ua` (from `default_stim.safety_limit_ua`) is for
+    whatever chooses the amplitudes; the forward pass does not clamp.
     """
 
     def __init__(self, params: dict, electrode_array: LGNElectrodeArray,
@@ -160,8 +138,6 @@ class LGNPhospheneSimulator:
             electrode_array.local_magnification.major_deg_per_mm,
             electrode_array.local_magnification.minor_deg_per_mm,
             self.data_kwargs, self.verbose)
-        # Alongside `out_of_view`: the other way an electrode can be
-        # present in the model yet absent from the rendered image.
         self.no_magnification = self.size.no_magnification
 
         self.effective_charge_per_second = None
@@ -169,6 +145,7 @@ class LGNPhospheneSimulator:
         self.recruited_cells = None
 
         self._sampling_mask = None
+        self._phosphene_maps = None
         self._phosphene_centers = None
         self._sampling_method = require(params, 'sampling.sampling_method')
         self._pulse_width = (require(params, 'default_stim.pw_default')
@@ -179,8 +156,6 @@ class LGNPhospheneSimulator:
 
         self.soft_threshold = bool(
             require(params, 'thresholding.soft_threshold'))
-        # Match the spread already in the model rather than adding a new
-        # free parameter.
         self._soft_threshold_slope = optional(
             params, 'thresholding.soft_threshold_slope',
             1.0 / max(require(params, 'thresholding.activation_threshold_sd'),
@@ -195,11 +170,7 @@ class LGNPhospheneSimulator:
     # ------------------------------------------------------------------
     @property
     def electrode_dimension(self) -> int:
-        """Which tensor dimension numbers the electrodes.
-
-        0 without batching, 1 with. Public because
-        `dynaphos_lgn.bilateral` has to split and concatenate along it.
-        """
+        """Tensor dimension of the electrodes: 0 unbatched, 1 batched."""
         return self._electrode_dimension
 
     @property
@@ -207,10 +178,30 @@ class LGNPhospheneSimulator:
         """Which nucleus this simulator stimulates."""
         return self.array.hemisphere
 
+    # The same per-electrode views `BilateralLGNSimulator` offers, so
+    # callers need not care how many nuclei they hold.
+    @property
+    def simulators(self) -> Dict[str, 'LGNPhospheneSimulator']:
+        return {self.hemisphere: self}
+
+    @property
+    def electrode_slices(self) -> Dict[str, slice]:
+        return {self.hemisphere: slice(0, self.num_phosphenes)}
+
+    @property
+    def hemisphere_of_electrode(self) -> np.ndarray:
+        return np.full(self.num_phosphenes, self.hemisphere)
+
+    @property
+    def vf_xy(self) -> np.ndarray:
+        """(n, 2) visual-field position of every electrode, degrees."""
+        return self.array.vf_xy
+
+    def phosphene_sigma_deg(self, current_ua):
+        """(major, minor) phosphene sigmas in degrees."""
+        return self.array.phosphene_sigma_deg(current_ua)
+
     def _warn_about_out_of_view_electrodes(self):
-        """
-        Say so when electrodes sit outside the rendered field of view.
-        """
         half = require(self.params, 'run.view_angle') / 2
         origin = np.asarray(require(self.params, 'run.origin'), dtype=float)
         offset = np.abs(self.array.vf_xy - origin)
@@ -241,17 +232,16 @@ class LGNPhospheneSimulator:
 
         self.scatter_renderer = None
         if len(self.scatter_index):
+            patch_radius = array.scatter_patch_radius_deg()[self.scatter_index]
+            ceiling_fraction = require(
+                self.params, 'rendering.scatter_bandwidth_ceiling_fraction')
             self.scatter_renderer = ScatterRenderer(
                 array.scatter_points_xy[self.scatter_index],
                 array.vf_xy[self.scatter_index],
                 self.params,
-                array.scatter_patch_radius_deg()[self.scatter_index],
+                patch_radius,
                 array.scatter_bandwidth_floor_deg[self.scatter_index],
-                # Ceiling: a fraction of the patch radius, so the splat
-                # can never approach the point cloud's own extent.
-                (require(self.params,
-                         'rendering.scatter_bandwidth_ceiling_fraction')
-                 * array.scatter_patch_radius_deg()[self.scatter_index]),
+                ceiling_fraction * patch_radius,
                 self.data_kwargs)
 
     def _build_recruitment_buffers(self):
@@ -286,12 +276,8 @@ class LGNPhospheneSimulator:
 
     def get_current(self, amplitude: torch.Tensor, frequency: torch.Tensor,
                     pulse_width: torch.Tensor) -> torch.Tensor:
-        """Effective charge per second from a square-wave pulse train.
-
-        Identical in form to Dynaphos's V1 version, leak current
-        included. Rheobase and pulse-width dependence are transplanted
-        from human V1.
-        """
+        """Effective charge per second from a square-wave pulse train,
+        as in Dynaphos's V1 model."""
         leak = self.trace.get() + require(self.params,
                                           'thresholding.rheobase')
         charge_per_s = torch.relu((amplitude - leak) * pulse_width * frequency)
@@ -320,10 +306,8 @@ class LGNPhospheneSimulator:
                frequency: Optional[torch.Tensor] = None):
         """Advance the tissue state by one frame.
 
-        :param amplitude: Stimulation amplitude per electrode, in the
-            config's units (amperes). The conversion to the
-            microamperes `current_spread` works in happens here, once,
-            via ``run.current_unit_to_ua``.
+        :param amplitude: Stimulation amplitude per electrode, in amperes
+            (converted to uA via ``run.current_unit_to_ua``).
         """
         if pulse_width is None:
             pulse_width = self._pulse_width
@@ -346,12 +330,8 @@ class LGNPhospheneSimulator:
         self._last_amplitude_ua = amplitude_ua
 
     def spatial_activation(self) -> torch.Tensor:
-        """Per-electrode activation maps over the visual field, peak 1.
-
-        Ellipse-rendered and scatter-rendered electrodes are computed
-        separately and reassembled in the original electrode order, so
-        downstream code never has to know which is which.
-        """
+        """Per-electrode activation maps over the visual field, peak 1,
+        in the original electrode order."""
         res_x, res_y = require(self.params, 'run.resolution')
         lead = self.shape[:-3]
         out = torch.zeros((*lead, self.num_phosphenes, res_y, res_x),
@@ -391,29 +371,19 @@ class LGNPhospheneSimulator:
         return self.unclamped_percept().clamp(0, 1)
 
     def unclamped_percept(self) -> torch.Tensor:
-        """The current state's percept, summed over electrodes but not
-        yet clamped, so several nuclei can be added before the clamp."""
+        """The current percept, summed over electrodes but not clamped,
+        so several nuclei can be added before the clamp."""
         intensity = self.brightness.get() * self.detection_probability()
         return torch.sum(intensity * self.spatial_activation(),
                          dim=self._electrode_dimension)
 
     def detection_probability(self) -> torch.Tensor:
-        """Gate on tissue activation versus the per-electrode threshold.
+        """Probability that each phosphene is seen, from activation versus
+        the per-electrode threshold.
 
-        A logistic psychometric curve by default
-        (``thresholding.soft_threshold``), or Dynaphos's hard 0/1 mask
-        when that is off.
-
-        The logistic is baseline-corrected unless
-        ``thresholding.soft_threshold_baseline`` says otherwise, because
-        the raw logistic does **not** vanish at zero activation. The
-        threshold sits only ``mu/sd = 1.36`` slope-widths above zero, so
-        a silent electrode gets ``p(detect) = 0.204`` and an
-        unstimulated array renders a visible glow. Subtracting the
-        zero-activation value and renormalising fixes that without
-        flattening the curve: ``dp/da`` stays strictly positive
-        everywhere, including at ``a = 0``, which is the whole reason
-        the soft threshold exists.
+        A logistic curve when ``thresholding.soft_threshold`` is on,
+        Dynaphos's hard step otherwise. With the 'zero_activation'
+        baseline the logistic is shifted and rescaled so that p(0) = 0.
         """
         activation = self.activation.get()
         threshold = self.threshold.get()
@@ -423,25 +393,18 @@ class LGNPhospheneSimulator:
         probability = torch.sigmoid(self._soft_threshold_slope * margin)
         if self.soft_threshold_baseline == 'none':
             return probability
-        # p(0), i.e. the curve evaluated at zero activation. A tensor,
-        # not a constant: `threshold` is sampled per electrode.
+        # p(0), per electrode
         floor = torch.sigmoid(self._soft_threshold_slope * -threshold)
         return ((probability - floor)
                 / torch.clamp(1.0 - floor, min=1e-12)).clamp(min=0.0)
 
     # ------------------------------------------------------------------
-    # Stimulus sampling (unchanged in spirit from Dynaphos)
+    # Stimulus sampling
     # ------------------------------------------------------------------
     @property
     def phosphene_maps(self) -> torch.Tensor:
-        """Distance from every pixel to each phosphene centre, degrees.
-
-        Used only for stimulus sampling. Built from the electrodes'
-        visual-field positions, independently of which renderer each
-        electrode uses.
-        """
-        if getattr(self, '_phosphene_maps', None) is None:
-            from dynaphos_lgn.rendering import visual_field_grid
+        """Distance from every pixel to each phosphene centre, degrees."""
+        if self._phosphene_maps is None:
             gx, gy = visual_field_grid(self.params, **self.data_kwargs)
             centers = to_tensor(self.array.vf_xy, **self.data_kwargs)
             dx = gx[None] - centers[:, 0, None, None]
@@ -458,12 +421,8 @@ class LGNPhospheneSimulator:
 
     @property
     def sampling_mask(self) -> torch.Tensor:
-        """Which pixels fall inside each electrode's sampling region.
-
-        In ``receptive_fields`` mode the radius is the LGN receptive-field
-        centre radius at that electrode's eccentricity -- degrees
-        directly, not millimetres of tissue as in the V1 model.
-        """
+        """Which pixels fall inside each electrode's sampling region: the
+        receptive-field centre radius, or the single nearest pixel."""
         if self._sampling_mask is None:
             if self._sampling_method == 'receptive_fields':
                 radius = center_radius_deg(

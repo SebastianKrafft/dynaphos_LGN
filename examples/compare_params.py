@@ -1,93 +1,45 @@
-"""Compare LGN simulator parameter sets, quantitatively, on the same
-electrodes and the same images, under optimised stimulation.
+"""Compare LGN parameter sets on the same electrodes and images, under
+optimised stimulation.
 
-Every condition is a set of config overrides applied to one shared base
-config. Each condition is built with the same `run.seed`, so the
-electrode array is the same draw every time and only the parameter under
-test changes. The script checks this and reports it (`same_electrodes`).
+Every condition in CONDITIONS is a set of config overrides on one base
+config, built with the same `run.seed`, so only the parameter under test
+changes (`same_electrodes` checks this). For every image the
+per-electrode amplitudes are found by gradient descent through the
+simulator, bounded to [0, `default_stim.safety_limit_ua`]:
 
-Stimulation is optimised, not mapped from brightness. For every image,
-the per-electrode amplitudes are found by gradient descent through the
-simulator so that the percept matches the image, each amplitude bounded
-to [0, `default_stim.safety_limit_ua`] from the config. The optimiser is
-free to use low currents where high ones would merge phosphenes into
-one bright mass, so a condition is judged by the best percept it can
-produce, not by what a fixed brightness-to-current rule makes of it.
+    loss   MSE between percept (before the [0, 1] clamp) and image, both
+           blurred to ANALYSIS_BLUR_DEG and pooled to the analysis grid
+    start  rheobase + START_FRACTION of the way to the safety limit; below
+           the rheobase there is no gradient
+    final  amplitudes below the rheobase are set to zero
 
-    loss       mean squared difference between percept and image, both
-               blurred to ANALYSIS_BLUR_DEG and pooled to the analysis
-               grid, inside the covered region. The percept is taken
-               before the [0, 1] clamp, so light spilling into the
-               background is penalised even where it saturates.
-    start      every electrode at the rheobase plus START_FRACTION of
-               the way to the safety limit. Below the rheobase the model
-               delivers no charge, so there is no gradient: an electrode
-               started there could never switch on.
-    final      amplitudes that end below the rheobase are set to zero
-               (they deliver no charge, so a protocol would not send
-               them) and the percept is rendered once more.
+A hard threshold is optimised against its logistic surrogate and then
+rendered with the hard gate.
 
-The optimiser knows each electrode's threshold, as it would after
-per-electrode calibration in a patient. A hard threshold passes no
-gradient, so `thresholding.soft_threshold: False` is optimised against
-its logistic surrogate (the 'none' baseline, whose 50% point is the hard
-gate's step) and then rendered with the hard gate.
+Metrics
+  threshold_ua        median current where p(detect) crosses 0.5
+  threshold_z         (threshold_ua - 40) / 12, Pezaris & Reid (2007)
+  sigma_deg_40ua,     median phosphene sigma (geometric mean of major and
+  sigma_deg_100ua     minor), degrees
+  digit_acc           MNIST accuracy of a CNN trained on clean digits and
+                      tested on the percepts
+  fit_loss            optimiser's final loss on the test digits
+  bars_contrast_*     (on - off) / (on + off) per band of the bars image
+  e_discrim           1 - mean pairwise correlation of the four tumbling-E
+                      percepts
+  pearson_r, ssim,    percept vs image, averaged over bars, E and shapes
+  mse_norm
+  frac_active         fraction of electrodes above the rheobase
+  current_active_ua   mean current of those electrodes
+  frac_at_limit       fraction at >= 99% of the safety limit
 
-There is no ground-truth LGN percept to score against, so the metrics
-fall into three groups, reported side by side, never combined:
+Every metric is computed `--repeats` times, each with a fresh threshold
+draw seeded by repeat index, so conditions are compared pairwise. The
+`ideal_input` row scores the classifier on clean digits (chance is 0.10).
 
-1. Benchmarks against measured LGN data
-     threshold_ua        median current at which p(detect) crosses 0.5,
-                         one frame (1 / run.fps) of stimulation
-     threshold_z         (threshold_ua - 40) / 12, Pezaris & Reid (2007)
-     sigma_deg_40ua,     median phosphene sigma (geometric mean of major
-     sigma_deg_100ua     and minor), degrees
-2. Percept quality -- what a person would have to work with
-     digit_acc           MNIST accuracy of a CNN trained on CLEAN digits
-                         (blurred to the analysis scale) and tested on
-                         the percepts, unchanged. It never sees a percept
-                         in training, so it only scores a percept that
-                         looks like its digit: a proxy for recognition,
-                         not a measure of what the percept encodes
-     fit_loss            the optimiser's final loss on the test digits
-     bars_contrast_*     (on - off) / (on + off) of the percept over the
-                         bars and gaps of each band of the bars image
-     e_discrim           1 - mean pairwise correlation of the percepts of
-                         the four tumbling-E orientations
-     pearson_r, ssim,    percept vs image, both blurred to the analysis
-     mse_norm            scale, inside the covered region, averaged over
-                         the bars, E and shapes images
-3. The stimulation the optimiser chose (test digits)
-     frac_active         fraction of electrodes driven above the rheobase
-     current_active_ua   mean current of those electrodes
-     frac_at_limit       fraction at 99% of the safety limit or more
-
-The threshold noise is the model's only stochastic element, so every
-metric is computed `--repeats` times, each with a fresh threshold draw
-(and a fresh classifier initialisation). The draws are seeded by repeat
-index, so condition A's repeat k and condition B's repeat k use the same
-standard-normal draw: the comparison is paired. Stimulation is
-re-optimised for every draw.
-
-A reference row, `ideal_input`, scores the classifier on the clean test
-digits: the ceiling for digit_acc. Chance is 0.10.
-
-Output (default examples/out/compare_params/):
-    metrics.csv        mean and sd per condition
-    metrics_raw.csv    one row per condition and repeat
-    summary.png        one panel per metric, conditions against baseline
-    examples.png       what each condition's percepts look like
-    checkpoints/       every finished repeat of every condition, and the
-                       trained classifiers
-
-Checkpoints make a run resumable: if it stops (a crash, a CUDA error
-after the laptop slept), rerun the same command with --resume and only
-the unfinished repeats are computed. Draws and classifier seeds are
-fixed by index, so a resumed run gives the numbers an uninterrupted one
-would. --resume refuses checkpoints written with different settings or
-a different config, and a run into a folder that already holds
-checkpoints must say --resume or --fresh, so finished work is never
-discarded by accident.
+Output (default examples/out/compare_params/): metrics.csv,
+metrics_raw.csv, summary.png, examples.png and checkpoints/. Rerun with
+--resume to continue a stopped run; --fresh discards old checkpoints.
 
 Usage::
 
@@ -96,17 +48,8 @@ Usage::
     python examples/compare_params.py --conditions baseline,K_x2
     python examples/compare_params.py --resume          # after a stop
 
-Optimisation dominates the run time: ~0.8 s per image on an RTX 4060
-Laptop GPU at the default 60 steps, so about 20 minutes per condition
-at the defaults. --n-test and --repeats trade precision for time.
-
-MNIST is read from data/MNIST/ as the four original .gz files. Pass
---download to fetch them there (~11.6 MB) if they are missing.
-
-NOTE `sampling.*` has no effect here: the optimiser, not receptive-field
-sampling, turns images into amplitudes. `current_spread.aggregation` is
-not a condition either: the forward pass does not call
-`aggregate_activation`, so sweeping it would show no effect at all.
+MNIST is read from data/MNIST/ (pass --download to fetch it).
+`sampling.*` has no effect here: the optimiser chooses the amplitudes.
 """
 from __future__ import annotations
 

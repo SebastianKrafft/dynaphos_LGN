@@ -1,26 +1,11 @@
-"""The mirrored right LGN, and the bilateral simulator built on it.
-
-Two things are worth checking here and they are different in kind.
-
-The mirror itself is exact arithmetic: a reflection, so it has an
-inverse, it preserves everything orthogonal to it, and it must leave the
-999 markers and the ipsilateral placeholder meaning what they meant.
-Those tests compare against the source atlas rather than against
-constants, so they would catch a reflection applied to the wrong axis or
-an inclination convention that drifts.
-
-The bilateral simulator is composition: the claim is that summing two
-nuclei gives what one array holding all the same electrodes would, and
-that nothing leaks between two state machines that should be
-independent.
-"""
+"""The mirrored right LGN, and the bilateral simulator built on it."""
 import copy
 
 import numpy as np
 import pytest
 import torch
 
-from dynaphos_lgn.atlas import (JacobianAtlas, MirroredAtlas,
+from dynaphos_lgn.atlas import (MirroredAtlas,
                                 MirroredJacobianAtlas, mirror_inclination)
 from dynaphos_lgn.bilateral import (BilateralLGNSimulator, hemifield_of,
                                     split_targets_by_hemifield)
@@ -150,7 +135,7 @@ class TestMirroredAtlas:
         assert mirrored_atlas.is_synthetic is True
 
     def test_refuses_to_mirror_a_mirror(self, mirrored_atlas):
-        with pytest.raises(ValueError, match="Mirroring a mirror"):
+        with pytest.raises(ValueError, match="reflects the left LGN"):
             MirroredAtlas(mirrored_atlas)
 
     def test_lateral_distance_picks_out_mirror_image_tissue(
@@ -240,14 +225,7 @@ class TestMirroredJacobianAtlas:
 
     def test_major_axis_is_reflected(self, mirrored_jacobian,
                                      synthetic_jacobian, voxel_pairs):
-        """theta -> pi - theta: the same axis, seen in a mirror.
-
-        An ellipse's major axis is a direction only up to pi -- the
-        SVD is free to return either singular vector -- so the
-        comparison is made in the doubled angle, where that freedom
-        cancels and the reflection shows up as a sign change on sin
-        alone.
-        """
+        """theta -> pi - theta: the same axis, seen in a mirror."""
         from dynaphos_lgn.magnification import JacobianMagnification
         mirrored, source = voxel_pairs
         got = JacobianMagnification.decompose(
@@ -399,7 +377,20 @@ class TestBuildDispatch:
         assert isinstance(simulator, LGNPhospheneSimulator)
         assert simulator.hemisphere == 'left'
         assert set(parts) == {'atlas', 'jacobian_atlas', 'kernel',
-                              'magnification', 'electrode_array'}
+                              'magnification', 'electrode_array',
+                              'simulator', 'hemispheres'}
+        assert (parts['hemispheres']['left']['electrode_array']
+                is parts['electrode_array'])
+
+    def test_one_nucleus_offers_the_bilateral_views(self, lgn_params):
+        simulator, _ = build_simulator(lgn_params, synthetic=True)
+        n = simulator.num_phosphenes
+        assert simulator.simulators == {'left': simulator}
+        assert simulator.electrode_slices == {'left': slice(0, n)}
+        assert list(simulator.hemisphere_of_electrode) == ['left'] * n
+        assert simulator.vf_xy.shape == (n, 2)
+        major, minor = simulator.phosphene_sigma_deg(50.0)
+        assert major.shape == minor.shape == (n,)
 
     def test_right_alone_is_buildable(self, params_override):
         params = params_override(atlas__hemispheres=['right'])
@@ -552,13 +543,7 @@ class TestBilateralForwardPass:
     def test_stimulating_one_nucleus_leaves_the_other_silent(self,
                                                              bilateral):
         """Two nuclei, two independent state machines: current in one
-        must not charge, light or recruit anything in the other.
-
-        Stated over the right nucleus's own state rather than over the
-        left half of the frame, because a phosphene sitting on the
-        vertical meridian spreads across it -- that is the retinotopy
-        doing its job, not one nucleus leaking into the other.
-        """
+        must not charge, light or recruit anything in the other."""
         simulator, _ = bilateral
         simulator.reset()
         amplitude = torch.zeros(simulator.num_phosphenes)
@@ -674,7 +659,7 @@ class TestBilateralForwardPass:
     def test_describe_says_what_the_right_half_is(self, bilateral):
         text = bilateral[0].describe()
         assert '[left LGN]' in text and '[right LGN]' in text
-        assert 'reflected' in text
+        assert 'mirrored' in text
 
     def test_a_wrongly_sized_amplitude_says_so(self, bilateral):
         simulator, _ = bilateral

@@ -38,29 +38,14 @@ def atlas(lgn_params):
 
 
 def get_foveal_voxels(atlas: ErwinAtlas) -> np.ndarray:
-    """Voxels belonging to the fovea's projection column, per the paper:
-    "inclination sectors converge on the projection column of the
-    foveola posteriorly" -- operationalized as every voxel with raw
-    ECC.DAT == 0 (not the 999 missing-data sentinel). Found directly from
-    the loaded array, independently of horsley_clarke_to_index, so it's a
-    genuine external landmark rather than something derived from the
-    function under test.
-    """
+    """Voxels of the foveal projection column (raw ECC.DAT == 0), found
+    from the array rather than from the function under test."""
     return np.argwhere(atlas.eccentricity == 0)
 
 
 def test_horsley_clarke_to_index_roundtrips_on_foveal_column(atlas):
     """horsley_clarke_to_index should be the exact inverse of the atlas's
-    own index -> mm convention.
-
-    Converting the foveal column's voxel indices to mm and back through
-    the function under test is a non-circular check: the indices come
-    from the raw array, not from this function. Using many non-degenerate
-    indices spread across the volume (rather than just the coordinate
-    system's origin) also means this would catch an axis-order bug (e.g.
-    ML/DV/AP swapped in the return tuple) that an origin-only check
-    cannot -- any permutation of an all-zero index still reads (0, 0, 0).
-    """
+    own index -> mm convention."""
     foveal_voxels = get_foveal_voxels(atlas)
     assert len(foveal_voxels) == EXPECTED_FOVEAL_VOXEL_COUNT
 
@@ -78,18 +63,8 @@ def test_horsley_clarke_to_index_roundtrips_on_foveal_column(atlas):
 
 
 def test_foveal_column_sits_posteriorly(atlas):
-    """The paper states the foveal column sits at the posterior end of
-    the nucleus. Since increasing AP index means more anterior (per the
-    atlas's origin documentation), the foveal voxels' AP indices should
-    cluster near the low end of the 0..319 range rather than the middle
-    or high end -- confirming the AP axis is assigned and oriented
-    correctly, independently of horsley_clarke_to_index.
-
-    The specific 25%-of-range threshold below isn't itself from a cited
-    source -- it's a deliberately loose cutoff, just tight enough to
-    distinguish "clustered posteriorly" from "spread evenly" or
-    "clustered anteriorly".
-    """
+    """The foveal column sits at the posterior (low-AP) end of the
+    nucleus, as the paper states."""
     foveal_voxels = get_foveal_voxels(atlas)
     ap_idx = foveal_voxels[:, 2]
 

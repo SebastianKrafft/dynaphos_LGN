@@ -1,23 +1,16 @@
 """Turning recruited tissue into a rendered percept.
 
-Two renderers, chosen per electrode rather than globally:
+Two renderers, chosen per electrode:
 
 `EllipseGaussianRenderer`
-    Evaluate the local Jacobian once at the electrode centre and stretch
-    the whole blob by that single linear map. One closed-form elliptical
-    Gaussian per electrode -- cheap, smooth, differentiable, and it
-    subsumes the isotropic case rather than being a separate path.
-
+    One elliptical Gaussian per electrode, shaped by the local
+    magnification at its centre.
 `ScatterRenderer`
-    Let every recruited voxel's own atlas position, weighted by its
-    recruitment, be the phosphene. Assumes no ellipse, so nothing has to
-    hold across the patch. The splat kernel that makes the cloud
-    continuous is a rendering technicality, sized from resolution and
-    point spacing and never from a magnification factor.
+    Every recruited voxel splatted at its own atlas position, weighted
+    by its recruitment.
 
-Both return activation maps normalised to a peak of 1, the convention
-the Dynaphos state machinery expects: amplitude lives in `brightness`,
-shape lives here.
+Both return activation maps with a peak of 1; brightness is applied by
+the simulator.
 """
 from __future__ import annotations
 
@@ -96,14 +89,11 @@ def _gaussian_kernel1d(sigma_px: torch.Tensor, radius: int) -> torch.Tensor:
 
 
 class ScatterRenderer:
-    """Per-voxel scatter rendering with a small, fixed splat kernel.
+    """Per-voxel scatter rendering with a small splat kernel.
 
-    Point positions are fixed at setup and only the weights move, so
-    which pixels each point touches is precomputed as bilinear splat
-    weights and the forward pass is a scatter-add plus a separable
-    Gaussian blur -- O(points + pixels * kernel) rather than the
-    O(points * pixels) a dense distance matrix would cost. Each
-    electrode renders into its own patch, not the whole frame.
+    Point positions are fixed, so their bilinear splat weights are
+    precomputed; the forward pass is a scatter-add into a per-electrode
+    patch followed by a separable Gaussian blur.
 
     :param points_xy: (n_electrodes, n_points, 2) point positions, deg.
     :param centers_xy: (n_electrodes, 2) patch centres, deg.
@@ -111,9 +101,7 @@ class ScatterRenderer:
     :param patch_radius_deg: (n_electrodes,) half-width of each patch.
     :param bandwidth_floor_deg: (n_electrodes,) lower clamp on the splat
         kernel, from the point cloud's own spacing.
-    :param bandwidth_ceiling_deg: (n_electrodes,) upper clamp, so the
-        kernel can never approach the cloud's overall extent even in a
-        degenerate case such as a single dominant voxel.
+    :param bandwidth_ceiling_deg: (n_electrodes,) upper clamp.
     """
 
     def __init__(self, points_xy: np.ndarray, centers_xy: np.ndarray,
@@ -219,18 +207,10 @@ class ScatterRenderer:
                       adaptive: bool = True) -> torch.Tensor:
         """Splat bandwidth per electrode, degrees.
 
-        With ``adaptive=False`` this is just the precomputed floor (the
-        point cloud's own median nearest-neighbour spacing), which costs
-        nothing at runtime.
-
-        With ``adaptive=True`` it is recomputed from the live
-        recruitment weights by a Scott/Silverman-style rule,
-        ``h = s * n_eff ** (-1/6)``, with ``s`` the weighted spread about
-        the weighted centroid and ``n_eff`` Kish's effective sample size.
-        That matters at low amplitude, where only a tight cluster of
-        voxels is active and a neighbourhood-sized bandwidth would
-        over-smooth it. The clamps are a smooth blend, not a hard
-        min/max, so no gradient is zeroed.
+        The precomputed floor, or with ``adaptive=True`` a Scott-style
+        ``h = s * n_eff ** (-1/6)`` from the live weights (weighted
+        spread `s`, Kish effective sample size `n_eff`), smoothly clamped
+        between floor and ceiling.
         """
         floor = self.bandwidth_floor
         if not adaptive:
@@ -314,13 +294,8 @@ def _smooth_min(a: torch.Tensor, b: torch.Tensor,
 def _smooth_clamp(x: torch.Tensor, low: torch.Tensor,
                   high: torch.Tensor, softness_fraction: float = 0.05
                   ) -> torch.Tensor:
-    """Differentiable stand-in for ``clamp(x, low, high)``.
-
-    A hard clamp zeroes the gradient outside the interval. The
-    smooth-min/max pair ``0.5 * (a + b +- sqrt((a - b)^2 + k^2))`` is
-    indistinguishable from the identity well inside it and still passes
-    a small gradient through a saturated value.
-    """
+    """Differentiable ``clamp(x, low, high)`` that still passes a small
+    gradient through saturated values."""
     span = torch.clamp(high - low, min=1e-9)
     softness = softness_fraction * span
     return _smooth_min(_smooth_max(x, low, softness), high, softness)

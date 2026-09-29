@@ -34,14 +34,7 @@ class TestEllipseRenderer:
             assert abs(x - c[0]) < 0.3 and abs(y - c[1]) < 0.3
 
     def test_peak_value_is_one(self, PARAMS):
-        """Peak 1 is the convention the state machinery relies on:
-        amplitude lives in `brightness`, shape lives in the renderer.
-
-        The tolerance is pixel quantisation, not slack -- with an even
-        pixel count no sample lands exactly on the centre, so the
-        brightest pixel sits up to half a pixel off and reads slightly
-        under 1.
-        """
+        """Peak 1, up to pixel quantisation."""
         img = EllipseGaussianRenderer(
             np.zeros((1, 2)), np.zeros(1), PARAMS, KW).render(
             torch.full((1, 1, 1), 1.2), torch.full((1, 1, 1), 0.6))

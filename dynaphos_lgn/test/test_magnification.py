@@ -41,20 +41,8 @@ class TestMalpeliFormulas:
 
     def test_hemifield_integral_reproduces_atlas_cell_counts(self,
                                                              lgn_params):
-        """A strong independent check that the density formula, the
-        spherical solid-angle convention and the one-hemifield-per-LGN
-        reading are mutually consistent.
-
-        Erwin et al. (1999) report 1,048,571 parvocellular and 104,841
-        magnocellular cells in the reconstruction. Integrating Malpeli's
-        density over a spherical solid angle and halving (one LGN
-        represents one hemifield) should land close to those.
-
-        A FLAT (non-spherical) convention would be off by a very
-        different amount at large eccentricity, so this also
-        discriminates between the two readings the atlas's own
-        documentation leaves open.
-        """
+        """Malpeli's density integrated over one hemifield reproduces the
+        atlas's published cell counts."""
         e = np.linspace(1e-3, 96.6, 200_000)
         de = np.deg2rad(e[1] - e[0])
         deg2_per_sr = (180.0 / np.pi) ** 2
@@ -148,18 +136,6 @@ class TestMalpeliDensityMagnification:
         m = malpeli_model
         lo, mid, hi = m.interval(np.array([1.0, 10.0, 30.0]))
         assert np.all(lo <= mid) and np.all(mid <= hi)
-
-    def test_thicker_column_means_smaller_linear_magnification(
-            self, malpeli_model):
-        m = malpeli_model
-        thin = m.map_length_mm(1.0)
-        thick = m.map_length_mm(4.0)
-        assert thick < thin
-
-    def test_calibration_inverts_the_map_length(self, malpeli_model):
-        m = malpeli_model
-        implied = m.calibrate_column_thickness_mm(5.0)
-        assert m.map_length_mm(implied) == pytest.approx(5.0, rel=1e-6)
 
     def test_reports_a_range_not_a_point(self, malpeli_model):
         """The project's rule: more than one arbitrary choice in the

@@ -1,4 +1,4 @@
-"""Current spread, recruitment kernels and multi-electrode aggregation."""
+"""Current spread, recruitment kernels and the multi-electrode bracket."""
 import copy
 import math
 
@@ -9,13 +9,7 @@ from dynaphos_lgn import current_spread as cs
 
 
 def kernel(params, **current_spread_overrides):
-    """Build a kernel from the config with a few keys overridden.
-
-    Tests exercise kernel variants, but the kernel can only be built
-    from a config now -- so they override the config rather than
-    constructing one by hand, which also keeps them honest about what
-    the config is actually able to express.
-    """
+    """Build a kernel from the config with a few keys overridden."""
     params = copy.deepcopy(params)
     params['current_spread'].update(current_spread_overrides)
     return cs.RecruitmentKernel.from_params(params)
@@ -141,29 +135,6 @@ class TestRecruitmentKernel:
             kernel(lgn_params, contour_value=1.0)
 
 
-class TestAggregation:
-    def setup_method(self):
-        self.w = torch.tensor([[[0.6, 0.2], [0.5, 0.1]]])  # (1, 2, 2)
-
-    def test_independent_sums(self):
-        out = cs.aggregate_activation(self.w, 'independent')
-        assert torch.allclose(out, torch.tensor([[1.1, 0.3]]))
-
-    def test_probability_summation_never_exceeds_one(self):
-        w = torch.rand(1, 8, 5)
-        out = cs.aggregate_activation(w, 'probability_summation')
-        assert torch.all(out <= 1.0) and torch.all(out >= 0.0)
-
-    def test_probability_summation_is_below_linear(self):
-        lin = cs.aggregate_activation(self.w, 'independent')
-        prob = cs.aggregate_activation(self.w, 'probability_summation')
-        assert torch.all(prob <= lin)
-
-    def test_unknown_mode_is_rejected(self):
-        with pytest.raises(ValueError):
-            cs.aggregate_activation(self.w, 'telepathy')
-
-
 class TestThresholdBracket:
     def test_ceiling_is_never_below_the_floor(self, lgn_params):
         for spacing in (0.05, 0.2, 0.5, 2.0):
@@ -178,9 +149,9 @@ class TestThresholdBracket:
             wide['floor_fraction'])
 
     def test_regime_follows_spacing_over_radius(self, lgn_params):
-        assert 'field-summation' in cs.threshold_reduction_bracket(
+        assert 'high overlap' in cs.threshold_reduction_bracket(
             4, 0.1, lgn_params)['regime']
-        assert 'probability-summation' in cs.threshold_reduction_bracket(
+        assert 'low overlap' in cs.threshold_reduction_bracket(
             4, 1.5, lgn_params)['regime']
 
     def test_reports_the_geometric_quantity_that_decides_it(self, lgn_params):

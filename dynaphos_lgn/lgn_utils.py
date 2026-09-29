@@ -33,14 +33,12 @@ def get_electrode_layout(atlas,
         sharing a retinotopic position into one candidate. Also caps the
         candidate pool size.
     :param exclude_ipsi_flat_inclination: Exclude voxels carrying the
-        coarse +-135 deg ipsilateral placeholder.
-    :param depth_selection: Which voxel represents each bin, and so
-        which LAYER the electrodes land in:
-        - 'central': the bin's median voxel along the depth axis.
-        - 'random': a uniform draw from the bin, using `rng`. Spreads
-          electrodes across laminae.
-    :param rng: Used only to pick the farthest-point-sampling start. A
-        fresh (non-reproducible) generator if None.
+        ipsilateral placeholder.
+    :param depth_selection: Which voxel represents each bin, and so which
+        layer the electrode lands in: 'central' (the bin's median voxel)
+        or 'random' (a uniform draw, using `rng`).
+    :param rng: Used for the random depth draw and the farthest-point
+        start. A fresh generator if None.
     :return: (visual_field, voxel_indices), a `dynaphos.utils.Map` of
         electrode locations, and an (n_electrodes, 3) int array of
         (ml, dv, ap) atlas indices.
@@ -48,11 +46,7 @@ def get_electrode_layout(atlas,
     if rng is None:
         rng = np.random.default_rng()
 
-    valid = atlas.valid.copy()
-    if cell_class is not None:
-        valid &= np.isin(atlas.layer, list(atlas.LAYER_CODES[cell_class]))
-    if exclude_ipsi_flat_inclination:
-        valid &= ~atlas.is_ipsi_sentinel()
+    valid = atlas.eligible(cell_class, exclude_ipsi_flat_inclination)
 
     ecc = atlas.eccentricity_deg
     if max_eccentricity is None:

@@ -1,32 +1,9 @@
 """Both nuclei at once: one percept covering the whole visual field.
 
-One LGN represents one hemifield, so a single `LGNPhospheneSimulator`
-can only ever fill half the frame. `BilateralLGNSimulator` holds one
-per nucleus -- the published left atlas and its mirror image -- and adds
-their percepts.
-
-The two are genuinely independent simulators, each with its own
-electrode array, its own leaky-integrator state and its own per-electrode
-thresholds, which is what the biology says: stimulating the left LGN
-does not charge the right one. What they share is the rendered frame,
-and the sum happens where it would anyway, in the eye:
-
-    percept = clamp( sum over BOTH arrays of brightness * p(detect) *
-                     activation map , 0, 1 )
-
-That is the same expression a single array of all the electrodes would
-evaluate, with the clamp applied once at the end rather than per
-nucleus, so a bilateral run and a hypothetical one-array run of the same
-electrodes agree exactly.
-
-Electrodes are ordered left nucleus first, then right, and every
-per-electrode quantity this class exposes -- amplitudes in, brightness
-and sizes out -- uses that same order. `electrode_slices` and
+`BilateralLGNSimulator` holds one independent `LGNPhospheneSimulator`
+per nucleus and sums their unclamped percepts before a single clamp.
+Electrodes are numbered left nucleus first; `electrode_slices` and
 `hemisphere_of_electrode` say which is which.
-
-What the right half of the percept inherits is spelled out in
-`dynaphos_lgn.atlas.MirroredAtlas`: it is the left nucleus reflected,
-not a second measurement.
 """
 from __future__ import annotations
 
@@ -114,44 +91,25 @@ class BilateralLGNSimulator:
 
     @property
     def no_magnification(self) -> np.ndarray:
-        """Electrodes with no finite magnification, over both nuclei.
-
-        The other way an electrode can be in the model yet absent from
-        the image; see `LGNSize.no_magnification`.
-        """
+        """Electrodes with no finite magnification, over both nuclei."""
         return np.concatenate([sim.no_magnification
                                for sim in self.simulators.values()])
 
     @property
     def visual_field(self) -> Map:
-        """Every phosphene's position, as one polar `Map`.
-
-        The same thing `LGNElectrodeArray.visual_field` is for a single
-        nucleus, over both. Note that inclination now uses its whole
-        range: one nucleus spans (-90, 90) deg, the other the rest.
-        """
+        """Every phosphene's position, as one polar `Map`."""
         return Map(r=self.eccentricity_deg,
                    phi=np.deg2rad(self.inclination_deg))
 
     @property
     def shape(self) -> tuple:
-        """The per-electrode tensor shape, over both nuclei.
-
-        The sub-simulators' own shape with the electrode dimension
-        widened to hold all of them, so a target built against this
-        broadcasts against what `get_state` returns.
-        """
+        """The per-electrode tensor shape, over both nuclei."""
         first = self.simulators[self.hemispheres[0]].shape
         return (first[:self.electrode_dimension] + (self.num_phosphenes,)
                 + first[self.electrode_dimension + 1:])
 
     def phosphene_sigma_deg(self, current_ua):
-        """(major, minor) phosphene sigmas in degrees, both nuclei.
-
-        A reflection leaves both principal magnifications untouched, so
-        the right nucleus's sizes are its mirror-image voxels' own --
-        nothing about the size model changes between the two.
-        """
+        """(major, minor) phosphene sigmas in degrees, both nuclei."""
         pairs = [sim.array.phosphene_sigma_deg(current_ua)
                  for sim in self.simulators.values()]
         return (np.concatenate([major for major, _ in pairs]),
@@ -162,10 +120,7 @@ class BilateralLGNSimulator:
     # ------------------------------------------------------------------
     def split(self, x, name: str = 'value') -> List[Optional[torch.Tensor]]:
         """Cut a per-electrode tensor into one piece per hemisphere.
-
-        Scalars and single-element tensors are passed to every
-        hemisphere unchanged, so a frequency or pulse width that applies
-        to the whole array still does.
+        Scalars are broadcast to every hemisphere.
 
         :param x: Tensor, array or scalar, with the electrode dimension
             sized `num_phosphenes`. None passes through as None.
@@ -176,10 +131,6 @@ class BilateralLGNSimulator:
         tensor = torch.as_tensor(x, **self.data_kwargs) \
             if not isinstance(x, torch.Tensor) else x
         if tensor.ndim == 0 or tensor.numel() == 1:
-            # Broadcast rather than hand the same one-element
-            # tensor to a simulator that wants one value per
-            # electrode. `expand` keeps it a view, so a scalar
-            # stays differentiable and costs nothing per side.
             return [tensor.reshape(()).expand(sim.shape)
                     for sim in self.simulators.values()]
 
@@ -221,12 +172,7 @@ class BilateralLGNSimulator:
 
     def __call__(self, amplitude, pulse_width=None,
                  frequency=None) -> torch.Tensor:
-        """Render one frame of simulated percept, whole visual field.
-
-        The per-nucleus contributions are summed before the clamp, not
-        after, so this agrees exactly with what one array holding all
-        the same electrodes would produce.
-        """
+        """Render one frame of simulated percept, whole visual field."""
         self.update(amplitude, pulse_width, frequency)
         return sum(sim.unclamped_percept()
                    for sim in self.simulators.values()).clamp(0, 1)
@@ -253,12 +199,7 @@ class BilateralLGNSimulator:
 
     def sample_stimulus(self, activation_mask,
                         rescale: bool = False) -> torch.Tensor:
-        """Turn an image into per-electrode amplitudes for both nuclei.
-
-        Each nucleus samples the same whole image; because their
-        electrodes sit in opposite hemifields, between them they read
-        all of it.
-        """
+        """Turn an image into per-electrode amplitudes for both nuclei."""
         return torch.cat([sim.sample_stimulus(activation_mask, rescale)
                           for sim in self.simulators.values()], dim=-1)
 
@@ -277,11 +218,8 @@ class BilateralLGNSimulator:
         return out
 
     def layer_activation_table(self) -> Dict[str, np.ndarray]:
-        """Last frame's per-layer recruitment, keyed by layer name.
-
-        Both nuclei have the same laminae, so the columns are shared and
-        the rows are all the electrodes, left first.
-        """
+        """Last frame's per-layer recruitment, keyed by layer name, rows
+        over all electrodes."""
         activations = []
         for name, sim in self.simulators.items():
             if sim.layer_activation is None:
@@ -302,29 +240,14 @@ class BilateralLGNSimulator:
                          f"{span.stop - 1}")
             lines.append(sim.describe())
             lines.append("")
-        if 'right' in self.simulators:
-            lines.append(
-                "The right nucleus is the published left atlas reflected "
-                "across the")
-            lines.append(
-                "midline, not a second reconstruction. Its half of the "
-                "percept assumes")
-            lines.append(
-                "the two LGNs are mirror images; see MirroredAtlas for what "
-                "that does")
-            lines.append("and does not claim.")
         return '\n'.join(lines).rstrip()
 
 
 def split_targets_by_hemifield(eccentricity_deg: Sequence[float],
                                inclination_deg: Sequence[float],
                                hemispheres: Sequence[str]) -> dict:
-    """Route requested percept locations to the nucleus that can reach.
-
-    A target's hemifield is the sign of ``x = E cos(I)``: positive is the
-    right hemifield, which the left LGN represents. Targets on the
-    vertical meridian (x = 0) go to the left nucleus, arbitrarily but
-    consistently -- both represent that strip.
+    """Route requested percept locations to the nucleus that covers them:
+    x = E cos(I) >= 0 to the left LGN, x < 0 to the right one.
 
     :return: ``{hemisphere: (eccentricity, inclination)}`` for each
         hemisphere in `hemispheres`.

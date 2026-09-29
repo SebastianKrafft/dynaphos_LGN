@@ -1,14 +1,7 @@
 """Config access for the LGN package.
 
-Every number this package uses comes from the parameter dictionary:
-no module-level constants, no defaults in function signatures. A value
-you cannot change without editing code is not refinable, and this
-simulator exists to be refined as data arrives.
-
-Use `require`, not ``params['a']['b']``, and never ``.get(key,
-fallback)`` -- a fallback in code is the module-level constant this
-module exists to abolish, hidden one level deeper. `require` fails
-immediately and names the dotted path that was missing.
+Parameters are read with `require`, which names the missing dotted path
+instead of falling back to a default in code.
 """
 from typing import Any, Mapping, Optional, Sequence
 
@@ -46,13 +39,8 @@ def require(params: Mapping, path: str) -> Any:
 
 
 def optional(params: Mapping, path: str, default: Any = None) -> Any:
-    """Fetch a genuinely optional parameter.
-
-    For values whose absence is meaningful -- a null ``cells_per_mm3``
-    meaning "derive it from the atlas" -- not as a way to reintroduce
-    defaults. If you are reaching for this to avoid adding a config
-    key, add the key instead.
-    """
+    """Fetch a parameter whose absence (or null) is meaningful, such as
+    a null ``cells_per_mm3`` meaning "derive it from the atlas"."""
     try:
         value = require(params, path)
     except ParameterError:

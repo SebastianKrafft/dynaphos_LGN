@@ -1,14 +1,9 @@
 """Receptive-field geometry for LGN cell classes.
 
-Centre-surround difference-of-Gaussians sizes as a function of
-eccentricity and cell class. The simulator uses these for stimulus
-sampling -- which patch of image an electrode "sees" -- not for
-phosphene appearance.
-
-Verification is unusually uneven here: the M/P coefficients are an
-in-project fit to digitised Croner & Kaplan (1995) points, and the
-koniocellular defaults are owl monkey, good for the K > M > P ordering
-and not for absolute sizes.
+Difference-of-Gaussians centre and surround sizes by eccentricity and
+cell class: Croner & Kaplan (1995) for magno/parvo, Xu et al. (2002) for
+konio. The simulator uses them for stimulus sampling, not for phosphene
+appearance.
 """
 from __future__ import annotations
 
@@ -32,13 +27,10 @@ class ReceptiveField:
     """Difference-of-Gaussians receptive-field parameters.
 
     :ivar center_radius_deg: rc, the 1/e radius of the centre Gaussian
-        -- Croner & Kaplan's convention, NOT a standard deviation
         (rc = sqrt(2) * sigma).
     :ivar surround_radius_deg: rs, same convention.
-    :ivar surround_center_volume_ratio: The INTEGRATED surround/centre
-        ratio ``(Ks*rs^2)/(Kc*rc^2)``, as the literature reports it. The
-        peak ratio the DoG equation needs is derived from it in
-        `surround_center_peak_ratio`.
+    :ivar surround_center_volume_ratio: The integrated ratio
+        ``(Ks*rs^2)/(Kc*rc^2)``; see `surround_center_peak_ratio`.
     :ivar cell_class: Which class these describe.
     """
 
@@ -59,11 +51,7 @@ class ReceptiveField:
 
     @property
     def center_sigma_deg(self) -> np.ndarray:
-        """The centre Gaussian's standard deviation, rc / sqrt(2).
-
-        Kept distinct from rc: collapsing the two is a factor of 1.41 in
-        every derived size.
-        """
+        """The centre Gaussian's standard deviation, rc / sqrt(2)."""
         return np.asarray(self.center_radius_deg) / np.sqrt(2.0)
 
     @property
@@ -72,12 +60,7 @@ class ReceptiveField:
                 / np.asarray(self.center_radius_deg))
 
     def profile(self, r_deg: ArrayLike) -> np.ndarray:
-        """DoG sensitivity at radial distance `r_deg` from the centre.
-
-        The centre is normalised to peak at 1, so the net DoG peaks
-        slightly below 1 and crosses zero near the centre/surround
-        boundary. That is the shape, not an error.
-        """
+        """DoG sensitivity at radial distance `r_deg`, centre peak 1."""
         r = np.asarray(r_deg, dtype=float)
         rc = np.asarray(self.center_radius_deg, dtype=float)
         rs = np.asarray(self.surround_radius_deg, dtype=float)
@@ -102,8 +85,8 @@ def center_radius_deg(eccentricity_deg: ArrayLike, params: Mapping,
     if cell_class == 'konio':
         k = require(params, 'receptive_fields.xu_konio')
         rc = k['rc_slope_per_deg'] * e + k['rc_intercept_deg']
-        # The linear fit goes negative below ~4.9 deg; clamp to the same
-        # paper's measured mean below 15 deg, not to zero.
+        # The linear fit goes negative near the fovea; floor it at the
+        # paper's mean below 15 deg.
         return np.maximum(rc, k['rc_below_15deg'][0])
     if cell_class not in ('magno', 'parvo'):
         raise ValueError(f"Unknown cell_class {cell_class!r}; expected one "
@@ -126,18 +109,9 @@ def surround_radius_deg(eccentricity_deg: ArrayLike, params: Mapping,
                         form: str = 'exponential') -> np.ndarray:
     """Receptive-field surround radius rs(E), degrees.
 
-    rs/rc is
-    ``receptive_fields.croner_kaplan.surround_center_radius_ratio``,
-    split by class (parvo 6.7, magno 4.8) -- Croner & Kaplan (1995)
-    found these means significantly different (Student's t-test,
-    P=0.014), so a shared value would misapply parvo's ratio to
-    magno or vice versa. Applying it as a scalar multiplier still
-    forces rs to share rc's eccentricity dependence, which C&K's
-    own "no systematic variation with eccentricity" claim for this
-    ratio does not itself establish -- it is a qualitative read of
-    their Fig. 4c, not a regression result -- so that part remains a
-    flagged assumption. The koniocellular
-    class ignores it and uses Xu et al.'s own rs(E).
+    rc(E) times the per-class
+    ``receptive_fields.croner_kaplan.surround_center_radius_ratio``;
+    konio uses Xu et al.'s own rs(E).
     """
     if cell_class == 'konio':
         k = require(params, 'receptive_fields.xu_konio')

@@ -1,18 +1,5 @@
-"""Build a test image whose structure sits only in the right hemifield.
-
-One LGN represents the contralateral visual field, so a `dynaphos_lgn`
-array covers only half the rendered frame. Feeding it a centred
-photograph throws half the input away and makes the percept hard to
-read. These patterns put everything inside the half that is actually
-covered, drawn in degrees of visual angle against the same
-`run.resolution` / `run.view_angle` / `run.origin` the simulator uses,
-so image coordinates and electrode coordinates are in register.
-
-Feature sizes are chosen against the phosphenes the model actually
-produces (sigma ~0.8 deg at 100 uA), not against the pixel grid: inside
-the ~6 deg the default electrode array reaches, there are only about
-seven resolvable elements across. Anything finer tests the renderer's
-interpolation, not the prosthesis.
+"""Build a test image whose structure sits in the right hemifield, the
+half one (left) LGN covers, on the simulator's own pixel grid.
 
 Patterns
     bars    three bands of vertical bars at 1.2, 0.6 and 0.3 deg -- a
@@ -26,13 +13,9 @@ Usage::
     python examples/make_test_image.py --pattern e
     python examples/make_test_image.py --pattern bars --simulate
 
-`--simulate` also runs the image through the simulator and writes a
-stimulus/percept comparison beside it.
-
-The PNG is written flipped, so it looks upright in an image viewer and
-reloads the way the demo notebook loads `donders.png`::
-
-    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)[::-1]
+`--simulate` also writes a stimulus/percept comparison. The PNG is
+flipped so it looks upright; reload it with
+``cv2.imread(path, cv2.IMREAD_GRAYSCALE)[::-1]``.
 """
 from __future__ import annotations
 
@@ -50,23 +33,17 @@ from dynaphos_lgn.params import require                             # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 
-# The wedge the default electrode array reaches: x out to
-# electrodes.max_eccentricity_deg, y the same either side of the
-# horizontal meridian. Patterns are drawn inside this.
+# The region the patterns are drawn in, degrees
 X_MIN, X_MAX = 0.5, 6.0
 Y_MAX = 5.5
 
-# (y_lo, y_hi, bar width) in degrees, coarse to fine. Module-level so
-# compare_params.py can score each band against the same geometry.
+# (y_lo, y_hi, bar width) in degrees, coarse to fine
 BAR_BANDS = [(2.0, Y_MAX, 1.2), (-1.75, 1.75, 0.6), (-Y_MAX, -2.25, 0.3)]
 
 
 def coordinate_grid(params):
-    """(X, Y) pixel-centre coordinates in degrees, row 0 = bottom.
-
-    The same convention as `dynaphos_lgn.rendering.visual_field_grid`,
-    so an image built here lines up pixel-for-pixel with the percept.
-    """
+    """(X, Y) pixel-centre coordinates in degrees, row 0 = bottom, as in
+    `dynaphos_lgn.rendering.visual_field_grid`."""
     res_x, res_y = require(params, 'run.resolution')
     x_org, y_org = require(params, 'run.origin')
     half = require(params, 'run.view_angle') / 2
@@ -122,7 +99,6 @@ def make_test_image(params, pattern='bars'):
 
 def simulate(params, image, out_path, atlas_dir, n_electrodes):
     """Run the image through the simulator and write a comparison."""
-    import torch
     from matplotlib import pyplot as plt
     from dynaphos_lgn.build import build_simulator
 

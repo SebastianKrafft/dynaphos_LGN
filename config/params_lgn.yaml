@@ -1,23 +1,13 @@
 # ======================================================================
 # LGN phosphene simulator parameters
 # ======================================================================
-# Adapted from config/params.yaml (V1 / cortex).
+# Adapted from config/params.yaml (V1 / cortex). Every number the
+# dynaphos_lgn package uses lives here; code reads it through
+# `dynaphos_lgn.params.require`.
 #
-# EVERY number this package uses lives in this file. There are no
-# module-level constants and no defaults in function signatures: a value
-# you cannot change without editing code is not refinable, and this
-# project's whole premise is that its numbers will be refined as data
-# arrives. Code reads these through `dynaphos_lgn.params.require`, which
-# fails loudly and names the missing path rather than falling back.
-#
-# Each block records where its numbers come from and how far they had to
-# travel. The full provenance and uncertainty discussion lives in the
-# project documentation, not in the code.
-#
-# UNITS. Currents are in AMPERES here, matching the parent Dynaphos
-# config, because the temporal-dynamics parameters were fitted in those
-# units. The current-spread literature works in microamperes, so
-# `run.current_unit_to_ua` converts once, at the simulator boundary.
+# Currents are in AMPERES, as in the parent Dynaphos config;
+# `run.current_unit_to_ua` converts to microamperes at the simulator
+# boundary.
 # ======================================================================
 
 run:
@@ -39,47 +29,25 @@ display:
   dist_to_screen: 600         # mm
 
 # ----------------------------------------------------------------------
-# Atlas: file format, grid geometry and laminar coding
+# Atlas: Erwin, Baker, Busen & Malpeli (1999), one left macaque LGN
 # ----------------------------------------------------------------------
-# Erwin, Baker, Busen & Malpeli (1999). Verified full text. The atlas is
-# used for per-voxel retinotopic POSITION and layer identity only -- not
-# as a magnification source, since its reconstruction started from
-# Malpeli et al. (1996)'s own data and so is not independent of it.
 atlas:
   directory: data/Erwin_Atlas
   jacobian_cache: JACOBIAN.npz
 
-  # Grid order is (ML, DV, AP)
   shape_ml_dv_ap: [240, 280, 320]
   voxel_size_mm: 0.025
   file_order: F
 
-  # Which nuclei to simulate, and so which half of the visual field
-  # each covers. The published atlas is a single LEFT LGN, which
-  # represents the RIGHT hemifield -- with [left] alone the left half of
-  # every rendered frame stays empty, as it did before this key existed.
-  #
-  # 'right' is not a second dataset. It is that same volume reflected
-  # across the midsagittal plane: ML axis reversed, inclination sent to
-  # 180 - I. The assumption is that the two nuclei are mirror images,
-  # which is the textbook first approximation and no more -- real left
-  # and right LGNs differ in volume and cell count, and no second
-  # reconstructed atlas exists to say by how much. Anything built on it
-  # is tagged hemisphere: right all the way to the output.
-  #
-  # Widen run.view_angle when turning this on, or half the electrodes
-  # will sit outside the rendered frame (the simulator warns).
+  # Which nuclei to simulate. The left LGN covers the right hemifield;
+  # 'right' is the left atlas mirrored across the midline. Widen
+  # run.view_angle when simulating both.
   hemispheres: [left]           # [left] | [right] | [left, right]
   mirror:
-    ml_axis: 0                  # index of ML in shape_ml_dv_ap; the
-                                # reflection axis
+    ml_axis: 0                  # index of ML in shape_ml_dv_ap
 
-  # Per-file dtype and scale. `scale` divides the stored integer to give
-  # the physical value: ECC.DAT holds degrees x10, CELLS.DAT holds
-  # cells/voxel x1000, INCL.DAT holds plain integer degrees.
-  # `bytes_per_voxel` is what the size check in build.py verifies -- a
-  # headerless binary read at the wrong width produces a wrong volume
-  # without erroring.
+  # `scale` divides the stored integer to give the physical value.
+  # `bytes_per_voxel` is checked against the file size by build.py.
   files:
     eccentricity:
       name: ECC.DAT
@@ -102,24 +70,22 @@ atlas:
       bytes_per_voxel: 2
       scale: 1000.0
 
-  # "Not applicable" markers. Not the same value across files.
+  # "Not applicable" markers
   sentinels:
     eccentricity_inclination: 999
     layer: 0
     cells: 0
 
-  # Horsley-Clarke position of the atlas origin, per its own
-  # documentation: 8.5 mm lateral, -1.5 mm dorsal, 3.5 mm anterior, with
-  # increasing indices going lateral / dorsal / anterior.
+  # Horsley-Clarke position of voxel (0, 0, 0); indices increase
+  # lateral / dorsal / anterior.
   horsley_clarke_origin_mm:
     ml: 8.5
     dv: -1.5
     ap: 3.5
 
   layers:
-    # LAYERS.DAT codes. "contra"/"ipsi" here is EYE OF ORIGIN -- a
-    # different axis from INCL.DAT's contralateral/ipsilateral
-    # HEMIFIELD. Do not conflate the two.
+    # LAYERS.DAT codes. "contra"/"ipsi" is the eye of origin, not the
+    # hemifield.
     names:
       1: magno_contra
       2: magno_ipsi
@@ -132,60 +98,34 @@ atlas:
       contra: [1, 4]
       ipsi: [2, 3]
 
-  # Coarse placeholder inclination for the two ipsilateral-hemifield
-  # quadrants. Only 17 ipsilateral recording sites existed in the
-  # original study, too few for the 15 deg sectors used contralaterally.
-  # Present at EVERY eccentricity, not just the far periphery: real
-  # tissue representing a genuinely different part of the visual field,
-  # not missing data.
+  # Placeholder inclination for voxels representing the ipsilateral
+  # hemifield.
   ipsi_flat_inclination_deg: 135.0
   exclude_ipsi_flat_inclination: True
 
-  # Within this radius Erwin et al. assigned eccentricity directly from
-  # Malpeli et al.'s isotropic formula, because interpolation broke
-  # down. Any anisotropy found there is an artefact of construction.
+  # Within this radius the atlas's retinotopy is isotropic by
+  # construction.
   isotropic_construction_radius_deg: 1.0
 
-  # The atlas's own documented extrapolation limits.
   max_eccentricity_deg:
     parvo: 90.5
     magno: 96.6
 
   jacobian:
-    neighborhood_radius_vox: 1          # validated against the real
-                                        # atlas: median 26 valid
-                                        # neighbours, residual_rms
-                                        # median 0.09 deg, only 0.005%
-                                        # of fit-ok voxels above 1 deg
+    neighborhood_radius_vox: 1
     min_neighbors: 10
     ridge: 1.0e-8
-    transition_probe_distance_vox: 20   # 500 um, Erwin et al. p.97 tear
-                                        # width. Under the flag's
-                                        # documented meaning this should
-                                        # eventually track the actual
-                                        # current-spread radius instead.
+    transition_probe_distance_vox: 20   # 500 um
     transition_residual_threshold_deg: 1.0
     svd_chunk_size: 2000000
 
 # ----------------------------------------------------------------------
-# Synthetic stand-in atlas
+# Synthetic stand-in atlas, for tests and demos without the real data
 # ----------------------------------------------------------------------
-# A closed-form volume with the same interface as the real atlas, so
-# tests and demos need no 145 MB download. NOT a model of the LGN: the
-# retinotopy is a clean exponential, so it has no tears, no ipsilateral
-# sentinel sparsity, no reconstruction noise and no central-1 deg
-# artefact. Anything it validates is code correctness, not biology.
-#
-# The defaults give a volume roughly 2.4 x 1.6 x 5.0 mm, chosen so the
-# resulting magnification lands in the same order of magnitude as the
-# real atlas's (median sigma_1 around 4 deg/mm) rather than an order
-# above it.
 synthetic_atlas:
   shape_ml_dv_ap: [96, 64, 200]
   max_eccentricity_deg: 40.0
-  eccentricity_scale_deg: 2.0    # E0 in E(s) = E0 * (exp(s/lambda) - 1);
-                                 # smaller concentrates more tissue on
-                                 # the fovea
+  eccentricity_scale_deg: 2.0    # E0 in E(s) = E0 * (exp(s/lambda) - 1)
   n_layers: 4
   inclination_span_deg: 120.0
   margin_vox: 4
@@ -197,30 +137,16 @@ synthetic_atlas:
 # Electrode array
 # ----------------------------------------------------------------------
 electrodes:
-  n_electrodes: 64              # PER NUCLEUS, not in total: each
-                                # hemisphere gets its own array, so a
-                                # bilateral run of this config places 64
-                                # on each side.
-  # Per-hemisphere override, for an implant that is not symmetric. null
-  # means "use n_electrodes above"; a number replaces it for that
-  # nucleus only.
-  n_electrodes_by_hemisphere:
+  n_electrodes: 64              # per nucleus
+  n_electrodes_by_hemisphere:   # null: use n_electrodes
     left: null
     right: null
   cell_class: null              # null | parvo | magno
   min_eccentricity_deg: 0.0
   max_eccentricity_deg: 20.0
   bin_size_deg: 0.5
-  depth_selection: random       # first | central | random. Every
-                                # (ecc, incl) bin holds one projection
-                                # column seen in each lamina; taking the
-                                # first puts every electrode in the same
-                                # layer.
-  # I_max sizes the precomputed candidate neighbourhood, so the array is
-  # valid for any current at or below it. There is no published maximum
-  # safe LGN stimulation current, this is a protocol choice. For
-  # scale: Pezaris & Reid (2007) report a 40 +- 12 uA detection
-  # threshold, so 100 uA is ~2.5x threshold.
+  depth_selection: random       # central | random
+  # Largest current the array is precomputed for.
   max_current_ua: 100.0
   max_candidate_voxels: 40000   # budget; a voxel stride is chosen to fit
   n_scatter_points: 512
@@ -230,9 +156,6 @@ electrodes:
 # ----------------------------------------------------------------------
 # Sampling from images / video
 # ----------------------------------------------------------------------
-# Unlike the V1 model, the sampling region is specified directly in
-# degrees of visual angle, because LGN receptive-field sizes are
-# published that way (rather than as millimetres of cortical surface).
 sampling:
   sampling_method: receptive_fields   # receptive_fields | center
   rf_cell_class: parvo                # parvo | magno | konio
@@ -243,47 +166,28 @@ sampling:
 # ----------------------------------------------------------------------
 # Current spread and recruitment
 # ----------------------------------------------------------------------
-# K = 675 uA/mm^2, TRANSPLANTED FROM MACAQUE V1 (Tehovnik et al. 2006)
-# and UNVALIDATED FOR LGN. No LGN- or thalamus-specific current-spread
-# constant exists at any confidence level. A back-derivation from
-# Pezaris & Reid's behavioural scatter was attempted and rejected as not
-# scientifically plausible; no substitute uncertainty interval is used.
 current_spread:
-  k_ua_per_mm2: 675.0
+  k_ua_per_mm2: 675.0           # macaque V1 (Tehovnik et al. 2006)
 
   spread_model: stoney          # stoney (D = 2 sqrt(I/K)) | bosking
-  kernel_shape: gaussian        # gaussian | logistic. Never a hard
-                                # cutoff: that has zero gradient in I.
-  # 1/e^2, not half-max: this is the convention that makes the derived
-  # radius_to_sigma (sigma/R) equal V1 Dynaphos's hardcoded 0.5, so
-  # phosphene sizes stay comparable between the two simulators.
-  contour_value: 0.1353352832366127   # kernel weight at the Stoney radius
+  kernel_shape: gaussian        # gaussian | logistic
+  contour_value: 0.1353352832366127   # 1/e^2, kernel weight at the
+                                      # spread radius
   logistic_softness: 0.25
   tail_weight: 0.01             # where the candidate gather is truncated
 
-  # Bosking et al. (2017) gives a saturating functional SHAPE only. Its
-  # own magnitudes are human ECoG milliamperes at the cortical surface,
-  # not microelectrode microamperes; the slope and half-current below
-  # are Dynaphos's V1 values, not Bosking's.
+  # Saturating shape from Bosking et al. (2017), with Dynaphos's V1
+  # slope and half-current.
   bosking:
     max_diameter_mm: 5.3
     slope_per_ua: 0.08
     i_half_ua: 40.0
 
-  # Nucleolus diameters exist (parvo 2.25 um, magno 3.00 um), but the
-  # mapping from cell size to an excitability constant is a modelling
-  # choice with no measurement behind it, so the default applies none.
   class_scaling: none           # none | diameter | diameter_squared
   class_scaling_reference: parvo
   nucleolus_diameter_um:
     parvo: 2.25
     magno: 3.00
-
-  # No LGN multi-electrode data exists. These three bracket a real
-  # disagreement in the non-LGN literature (<10% vs 50-75% threshold
-  # reduction at N~4) rather than approximating one known answer.
-  aggregation: independent      # independent | field_superposition |
-                                # probability_summation
 
 recruitment:
   distance_histogram_bins: 192
@@ -295,95 +199,38 @@ magnification:
   model: jacobian               # jacobian | atlas_gradient |
                                 # anisotropic_gradient | malpeli_density
 
-  # Malpeli, Lee & Baker (1996), J Comp Neurol 375:363-377, Eqs 1-2.
-  # Verified full text. These are CELL DENSITY (cells/deg^2), not a
-  # tissue magnification -- see the density_derived block for what it
-  # costs to bridge that gap. Both rest on 415 recording sites from 38
-  # microelectrode passes in ONE macaque.
+  # Malpeli, Lee & Baker (1996), Eqs 1-2: cell density, cells/deg^2.
   malpeli:
     parvo:                      # a * (E + e0) ** exponent
       a: 1011688.0
       e0: 2.9144
       exponent: -2.6798
     magno:                      # a * ((E - e0)^2 + c) ** exponent
-      a: 2620.2                 # non-monotonic near the fovea BY DESIGN
+      a: 2620.2
       e0: 1.8322
       c: 5.5638
       exponent: -0.8012
 
-  # Turning Malpeli's density into a linear magnification needs a
-  # volumetric cell density and a projection-column thickness, neither
-  # of which the formula supplies. Both are intervals, so the model
-  # returns one. Set cells_per_mm3 to null to derive it from the atlas's
-  # own CELLS.DAT rather than an external packing figure.
+  # Converts Malpeli's density to a linear magnification.
   density_derived:
-    cells_per_mm3:
+    cells_per_mm3:              # null: derive from the atlas's CELLS.DAT
       parvo: null
       magno: null
-    # NOT one lamina: the summed depth of same-class laminae one
-    # projection column crosses. (low, central, high), mm.
-    #
-    # May be either one shared triple (as here) or a mapping with a
-    # `parvo` and a `magno` triple.
-    #
-    # MEASURED, and this value does not match it. The atlas measures
-    # its own T -- volume-per-solid-angle divided by the Jacobian's
-    # areal magnification -- giving summed parvo 0.56-1.77 mm and
-    # summed magno 0.20-0.74 mm. So the central 3.0 mm below is roughly
-    # 2x too thick for parvo and 5-7x for magno, and no single shared
-    # triple can be right for both: the classes differ by ~2.4x.
-    #
-    # The split value the measurement supports, each interval widened to
-    # bracket Connolly & Van Essen (1984)'s summed laminar thicknesses
-    # as well as this atlas's:
-    #
-    #   column_thickness_mm:
-    #     parvo: [0.40, 0.84, 1.77]
-    #     magno: [0.20, 0.39, 0.74]
-    #
-    # NOT adopted here: it moves every MalpeliDensityMagnification
-    # number by ~1.4x (parvo) to ~2.8x (magno), which is a model change
-    # and wants a sign-off, not a quiet edit. The code already accepts
-    # the split shape, so adopting it is this comment block minus the
-    # hashes.
+    # Summed same-class laminar thickness, (low, central, high) mm.
+    # Either one triple or a mapping with a `parvo` and a `magno` triple.
     column_thickness_mm: [1.0, 3.0, 5.0]
-    # Coarse anatomical anchor used to back-solve an implied thickness.
-    map_length_anchor_mm: [4.0, 5.0, 7.0]
-    map_length_integration:
-      min_eccentricity_deg: 0.05
-      max_eccentricity_deg: 90.0
-      n_samples: 20000
-    thickness_plausibility_bracket_mm: [0.05, 50.0]
 
   eccentricity_table_bin_width_deg: 1.0
 
-  # AnisotropicGradientMagnification: a 2-D (eccentricity, inclination)
-  # lookup table built once from the Jacobian atlas, so simulation never
-  # touches the per-voxel Jacobian. The bin widths are NOT free to widen
-  # casually: the real atlas has a narrow discontinuity around
-  # inclination ~-15 deg (present past ~20 deg eccentricity, well inside
-  # the parvocellular layers -- see AnisotropicGradientMagnification's
-  # docstring) that is only ~5-10 deg wide. Widening
-  # inclination_bin_width_deg much past this risks a bin straddling it
-  # and averaging torn tissue into a clean estimate; narrowing it
-  # further mainly costs more (and sparser) bins for no benefit, since
-  # min_voxels_per_bin will just flag them unreliable instead.
+  # 2-D (eccentricity, inclination) table for
+  # AnisotropicGradientMagnification. Keep the inclination bins narrow:
+  # the atlas has a ~5-10 deg wide discontinuity near -15 deg.
   anisotropic_gradient:
     eccentricity_bin_width_deg: 2.0
     inclination_bin_width_deg: 2.0
-    # Bins with fewer fit-ok voxels than this are flagged unreliable
-    # regardless of their value -- catches the sparse, noisy bins at the
-    # edge of the nucleus (max eccentricity, |inclination| -> 90 deg).
     min_voxels_per_bin: 20
-    # A bin is flagged unreliable if its median (major or minor) sits
-    # more than this many robust-sigmas (MAD-based) from its own
-    # eccentricity row's median. This is what actually catches the
-    # inclination seam once the grid is fine enough to isolate it.
-    outlier_z_threshold: 4.0
-    # Below this anisotropy (major/minor), the principal axis is close
-    # enough to arbitrary that the SVD's orientation is noise, not
-    # signal -- those bins store orientation=0 instead.
-    orientation_reliable_min_anisotropy: 1.05
+    outlier_z_threshold: 4.0    # robust z against the eccentricity row
+    orientation_reliable_min_anisotropy: 1.05   # below: orientation = 0
 
 # ----------------------------------------------------------------------
 # Receptive fields
@@ -391,11 +238,7 @@ magnification:
 receptive_fields:
   cell_classes: [magno, parvo, konio]
 
-  # NO published closed-form macaque rc(E) exists. These are in-project
-  # least-squares fits to digitised Croner & Kaplan (1995) Fig. 4
-  # points. The M/P ratio they imply runs 2.97x at the fovea down to
-  # 1.68x at 35 deg, so "about 2x" is a mid-range summary, not a
-  # constant.
+  # Fits to digitised Croner & Kaplan (1995) Fig. 4.
   croner_kaplan:
     exponential:                # rc = a * exp(b * E)
       magno: {a_deg: 0.096236, b_per_deg: 0.032755, r2_log: 0.619, n: 18,
@@ -405,40 +248,23 @@ receptive_fields:
     power:                      # rc = a * E^b
       magno: {a_deg: 0.046784, b: 0.473278, r2_log: 0.727}
       parvo: {a_deg: 0.024392, b: 0.399947, r2_log: 0.511}
-    # rs/rc, split by class. Croner & Kaplan (1995) report a MEAN
-    # (not median) rc/rs of 0.15 for P and 0.21 for M -- a
-    # significant difference (Student's t-test, P=0.014). Reciprocals:
-    # P 1/0.15=6.7, M 1/0.21=4.8. Applying either as a scalar
-    # multiplier still forces rs to share rc's eccentricity
-    # dependence -- C&K's own "no systematic variation with
-    # eccentricity" claim for this ratio is a qualitative read of
-    # their Fig. 4c, not a regression result like the volume ratio's
-    # (slope 0.01, r2=0.1) -- so that part remains a flagged
-    # assumption, split by class or not.
-    surround_center_radius_ratio:
+    surround_center_radius_ratio:   # rs/rc
       parvo: 6.7
       magno: 4.8
 
-  # Xu, Bonds & Casagrande (2002), OWL MONKEY. NO macaque koniocellular
-  # RF dataset exists in any form. Owl monkey absolute sizes run ~2x
-  # macaque and ~0.5x bush baby at matched eccentricity, so these are a
-  # placeholder for the K > M > P ordering, not transplantable sizes.
+  # Xu, Bonds & Casagrande (2002), owl monkey.
   xu_konio:
     rc_slope_per_deg: 0.063
     rc_intercept_deg: -0.31
     rc_r2: 0.59
     rs_slope_per_deg: 0.067
     rs_intercept_deg: 0.28
-    rc_below_15deg: [0.31, 0.05]    # mean, sd -- also the floor, since
-    rs_below_15deg: [0.91, 0.10]    # the linear fits go negative
+    rc_below_15deg: [0.31, 0.05]    # mean, sd; also the floor for the
+    rs_below_15deg: [0.91, 0.10]    # linear fits
     rs_over_rc_below_15deg: 3.61
 
-  # INTEGRATED (volume) surround/centre ratio, (Ks*rs^2)/(Kc*rc^2) --
-  # NOT the peak ratio Ks/Kc a DoG equation needs, which is ~45x
-  # smaller at rs/rc = 6.7. Using this directly as Ks/Kc makes the DoG
-  # negative almost everywhere. Not a universal constant either way:
-  # 0.55 macaque M+P (Croner & Kaplan), 0.77 owl monkey K (Xu et al.),
-  # 0.87 bush baby K (Irvin et al.).
+  # Integrated surround/centre ratio (Ks*rs^2)/(Kc*rc^2), not the peak
+  # ratio Ks/Kc.
   surround_center_volume_ratio:
     magno: 0.55
     parvo: 0.55
@@ -448,16 +274,12 @@ receptive_fields:
 # Phosphene size and rendering
 # ----------------------------------------------------------------------
 size:
-  # Kept for parity with the V1 config; the LGN path derives sigma from
-  # the recruitment kernel's own contour_value instead, so the size
-  # model and the recruitment model can never drift apart.
+  # Used by the V1 simulator only; the LGN path derives sigma from
+  # current_spread.contour_value.
   radius_to_sigma: 0.5
 
 rendering:
   adaptive_scatter_bandwidth: True
-  # The splat kernel is a rendering technicality -- continuity so
-  # gradients flow -- not a biological claim, so it is sized from render
-  # resolution and point spacing, never from a magnification factor.
   scatter_bandwidth_floor_pixels: 0.5
   scatter_bandwidth_ceiling_fraction: 0.2   # of the patch radius
   scatter_patch_radius_percentile: 99.5
@@ -467,13 +289,8 @@ rendering:
   max_kernel_radius_px: 12
 
 # ----------------------------------------------------------------------
-# Temporal dynamics
+# Temporal dynamics (from the V1 model)
 # ----------------------------------------------------------------------
-# Inherited unchanged from the V1 model. There is no LGN or thalamic
-# strength-duration data of any kind, and no evidence either way on
-# LGN's duty-cycle response, or on whether a single exponential decay is
-# adequate given relay cells' burst/tonic switching and corticothalamic
-# feedback.
 temporal_dynamics:
   trace_increase_rate: 13.95528162
   activation_decay_per_second: 0.00012340980408667956
@@ -486,96 +303,48 @@ brightness_saturation:
 # ----------------------------------------------------------------------
 # Thresholding
 # ----------------------------------------------------------------------
-# rheobase: human V1 (Fernandez et al. 2021), transplanted.
 thresholding:
   use_threshold: True
-  rheobase: 23.9e-6
+  rheobase: 23.9e-6             # human V1 (Fernandez et al. 2021)
   activation_threshold: 9.141886000943878e-08
   activation_threshold_sd: 6.715877869833961e-08
-  # A hard threshold has zero gradient on both sides, so a subthreshold
-  # electrode can never learn to cross it. The soft form replaces the
-  # step with a logistic psychometric curve -- which is what a detection
-  # experiment measures anyway -- at the cost of changing the model, not
-  # just the optimiser.
-  #
-  # ON by default: this simulator exists to be optimised end-to-end,
-  # and the hard gate makes that impossible for exactly the electrodes
-  # an optimiser most needs to move. Still a model change, so say so
-  # when reporting.
+  # Logistic detection curve instead of a hard step, so electrodes
+  # below threshold still get a gradient.
   soft_threshold: True
   soft_threshold_slope: null    # null -> 1 / activation_threshold_sd
-
-  # What the logistic should return at ZERO activation.
-  #
-  # The plain logistic does not return zero there, and not by a little:
-  # activation_threshold / activation_threshold_sd = 1.36, so an
-  # unstimulated electrode sits only 1.36 slope-widths below threshold
-  # and the default slope (1/SD) gives it p(detect) = 0.204. Multiplied
-  # by the brightness curve's own 0.117 floor at zero activation, a
-  # 64-electrode array on the real atlas renders a *zero-amplitude*
-  # frame with a peak pixel of 0.041 and 2.0% of pixels above 0.01 --
-  # measured, not estimated. Under the hard gate, and under the
-  # baselined soft gate, that frame is exactly black.
-  #
-  #   none            Plain logistic. Reproduces the behaviour of the
-  #                   soft threshold as first implemented.
-  #   zero_activation (default) Subtract the zero-activation value and
-  #                   renormalise:
-  #                       p(a) = (S(a) - S(0)) / (1 - S(0))
-  #                   so p(0) = 0 exactly and p(inf) = 1. This is the
-  #                   standard guess-rate correction from psychophysics,
-  #                   not an ad-hoc clamp, and -- the point -- it leaves
-  #                   dp/da strictly positive everywhere, including at
-  #                   a = 0. So it costs nothing that motivated turning
-  #                   the soft threshold on in the first place.
-  #
-  # NOT independently signed off: the soft-threshold flip was, this
-  # baseline choice was surfaced afterwards. Revisit if the pedestal
-  # turns out to be wanted (e.g. as a spontaneous-activity floor), in
-  # which case it should be a named parameter, not a side effect of the
-  # threshold/SD ratio.
+  # What the logistic returns at zero activation:
+  #   none             plain logistic (p(0) is about 0.2)
+  #   zero_activation  p(a) = (S(a) - S(0)) / (1 - S(0)), so p(0) = 0
   soft_threshold_baseline: zero_activation
 
 default_stim:
   relative_stim_duration: 1
   pw_default: 170.e-6           # seconds
   freq_default: 300             # Hertz
-  # Largest amplitude any electrode may be driven at. Optimised
-  # stimulation chooses currents at or below it. Like
-  # electrodes.max_current_ua this is a protocol choice: there is no
-  # published safe maximum for LGN microstimulation. It cannot exceed
-  # electrodes.max_current_ua, the current the array is precomputed for.
+  # Largest amplitude optimised stimulation may use. At most
+  # electrodes.max_current_ua.
   safety_limit_ua: 100.0
-  # Chronaxie is NOT a single number for LGN (Tehovnik & Slocum 2009).
-  # Short pulses bias towards axonal activation, including axons of
-  # passage. A range on purpose.
   chronaxie_range_s: [30.e-6, 200.e-6]
 
 # ----------------------------------------------------------------------
-# Benchmarks: measured LGN values
+# Benchmarks: measured values
 # ----------------------------------------------------------------------
-# Pezaris & Reid (2007), macaque LGN microstimulation. The n=6
-# titration and the n=14 main-task figures are NON-OVERLAPPING.
 benchmarks:
-  pezaris_2007:
-    threshold_ua: [40.0, 12.0]          # mean, sd (n=6)
+  pezaris_2007:                 # Pezaris & Reid (2007), macaque LGN
+    threshold_ua: [40.0, 12.0]          # mean, sd
     accuracy_deg: [2.3, 1.2]
     repeatability_deg: [0.8, 0.6]
-  # Two mechanistically different predictions, not one number.
-  # Floor: Callier et al. (2015). Ceiling: Kunigk et al. (2022).
+  # Multi-electrode threshold reduction: low-overlap limit from Callier
+  # et al. (2015), high-overlap limit from Kunigk et al. (2022).
   multi_electrode:
-    probability_summation_max_reduction: 0.10
+    low_overlap_max_reduction: 0.10
     field_summation_max_reduction: 0.66
     field_summation_vanishes_at_radii: 2.0
     saturates_at_n_electrodes: 4
 
 # ----------------------------------------------------------------------
-# Validation targets
+# Validation: Erwin et al. (1999)'s published totals, checked by build.py
 # ----------------------------------------------------------------------
-# Published totals reproduced from the raw .DAT files as a read-back
-# check. EDITING THESE EDITS THE CHECK, not the model -- a mismatch
-# means the atlas is being parsed wrongly, which produces plausible
-# nonsense everywhere downstream rather than an error.
 validation:
   erwin_1999:
     magno_cells: 104841
