@@ -40,6 +40,7 @@ class BilateralLGNSimulator:
         self.electrode_dimension = first.electrode_dimension
         self.batch_size = first.batch_size
         self.layer_names = first.layer_names
+        self.classes = first.classes
 
         for name, sim in self.simulators.items():
             if sim.electrode_dimension != self.electrode_dimension:
@@ -220,14 +221,22 @@ class BilateralLGNSimulator:
     def layer_activation_table(self) -> Dict[str, np.ndarray]:
         """Last frame's per-layer recruitment, keyed by layer name, rows
         over all electrodes."""
-        activations = []
-        for name, sim in self.simulators.items():
-            if sim.layer_activation is None:
-                raise RuntimeError("Call the simulator at least once first.")
-            activations.append(to_numpy(sim.layer_activation.detach()))
-        values = np.concatenate(activations, axis=self.electrode_dimension)
-        return {name: values[..., i]
-                for i, name in enumerate(self.layer_names)}
+        return self._table('layer_activation', self.layer_names)
+
+    def class_fraction_table(self) -> Dict[str, np.ndarray]:
+        """Last frame's share of recruited cells per percept class."""
+        return self._table('class_fraction', self.classes)
+
+    def _table(self, attribute: str, names) -> Dict[str, np.ndarray]:
+        """A per-electrode state tensor of both nuclei, split by its last
+        axis into named columns."""
+        values = [getattr(sim, attribute) for sim in self.simulators.values()]
+        if any(v is None for v in values):
+            raise RuntimeError(f"No {attribute} yet: call the simulator "
+                               f"first.")
+        values = np.concatenate([to_numpy(v.detach()) for v in values],
+                                axis=self.electrode_dimension)
+        return {name: values[..., i] for i, name in enumerate(names)}
 
     def describe(self) -> str:
         lines = [f"BilateralLGNSimulator: {self.num_phosphenes} electrodes "

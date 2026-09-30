@@ -26,6 +26,7 @@ from dynaphos_lgn.bilateral import (BilateralLGNSimulator,
                                     split_targets_by_hemifield)
 from dynaphos_lgn.current_spread import RecruitmentKernel
 from dynaphos_lgn.electrodes import LGNElectrodeArray
+from dynaphos_lgn.konio import add_konio_layers, konio_enabled, konio_report
 from dynaphos_lgn.magnification import (AnisotropicGradientMagnification,
                                         AtlasGradientMagnification,
                                         JacobianMagnification,
@@ -77,11 +78,17 @@ def check_atlas_files(directory: Union[str, Path], params: Mapping) -> str:
 def build_atlas(params: dict, atlas_dir: Optional[Union[str, Path]] = None,
                 synthetic: bool = False,
                 fallback_to_synthetic: bool = True):
-    """Load the real atlas, or the synthetic stand-in.
+    """Load the real atlas, or the synthetic stand-in, with K layers
+    added when `konio.enabled`.
 
     :param fallback_to_synthetic: Use the synthetic atlas, with a
         warning, when the real files are missing.
     """
+    atlas = _load_atlas(params, atlas_dir, synthetic, fallback_to_synthetic)
+    return add_konio_layers(atlas, params) if konio_enabled(params) else atlas
+
+
+def _load_atlas(params, atlas_dir, synthetic, fallback_to_synthetic):
     if synthetic:
         from dynaphos_lgn.synthetic_atlas import SyntheticAtlas
         return SyntheticAtlas(params)
@@ -104,6 +111,13 @@ def build_atlas(params: dict, atlas_dir: Optional[Union[str, Path]] = None,
     return ErwinAtlas(params).build_atlas(directory)
 
 
+def jacobian_cache_name(params: Mapping) -> str:
+    """The cache file: K layers change which voxels are fitted."""
+    key = ('atlas.jacobian_cache_konio' if konio_enabled(params)
+           else 'atlas.jacobian_cache')
+    return require(params, key)
+
+
 def build_jacobian(params: dict, atlas, cache_dir=None,
                    recompute: bool = False) -> JacobianAtlas:
     """Load the cached per-voxel Jacobian, or compute and cache it."""
@@ -111,7 +125,7 @@ def build_jacobian(params: dict, atlas, cache_dir=None,
         return JacobianAtlas(params).compute(atlas)
 
     cache_dir = Path(cache_dir)
-    path = cache_dir / require(params, 'atlas.jacobian_cache')
+    path = cache_dir / jacobian_cache_name(params)
     if path.exists() and not recompute:
         logging.info("Loading cached Jacobian atlas from %s.", path)
         return JacobianAtlas.load(path, params)
@@ -356,7 +370,8 @@ def atlas_report(atlas, params: Mapping) -> str:
     parvo = np.isin(atlas.layer, resolve_class_codes(params, 'parvo'))
     magno_cells = float(atlas.cells_per_voxel[magno].sum())
     parvo_cells = float(atlas.cells_per_voxel[parvo].sum())
-    tissue = atlas.layer != atlas._missing_layer
+    # Erwin et al.'s totals cover the magno and parvo laminae only.
+    tissue = magno | parvo
     volume = float(tissue.sum()) * atlas._voxel_size_mm ** 3
     density = atlas.cells_per_voxel[tissue]
 
@@ -405,6 +420,8 @@ def atlas_report(atlas, params: Mapping) -> str:
         f"{expected['reconstruction_accuracy_um'][0]} um "
         f"(SD {expected['reconstruction_accuracy_um'][1]} um).",
     ]
+    if konio_enabled(params):
+        lines += ['', konio_report(atlas, params)]
     return '\n'.join(lines)
 
 
@@ -512,7 +529,7 @@ def cache_jacobian(params: dict, atlas_dir=None, recompute: bool = False,
     jacobian = build_jacobian(params, atlas, directory, recompute)
     elapsed = time.time() - started
 
-    path = directory / require(params, 'atlas.jacobian_cache')
+    path = directory / jacobian_cache_name(params)
     size_mb = path.stat().st_size / 1e6 if path.exists() else float('nan')
 
     report = '\n\n'.join([
@@ -560,6 +577,9 @@ def main(argv=None) -> int:
     parser.add_argument('--check-only', action='store_true',
                         help='read the atlas and report on it, without '
                              'computing or writing anything')
+    parser.add_argument('--konio', action='store_true',
+                        help='add the koniocellular layers (konio.enabled); '
+                             'caches the K-inclusive Jacobian')
     parser.add_argument('--quiet', action='store_true')
     args = parser.parse_args(argv)
 
@@ -572,6 +592,8 @@ def main(argv=None) -> int:
     if not params_path.exists():
         parser.error(f"No params file at {params_path}; pass --params.")
     params = load_params(str(params_path))
+    if args.konio:
+        params['konio']['enabled'] = True
 
     if args.check_only:
         directory = Path(args.atlas_dir or require(params,

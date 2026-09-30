@@ -22,7 +22,8 @@ from dynaphos.utils import (get_data_kwargs, get_deg2pix_coeff, print_stats,
                             set_deterministic, to_numpy, to_tensor)
 from dynaphos_lgn.current_spread import RecruitmentKernel
 from dynaphos_lgn.electrodes import LGNElectrodeArray
-from dynaphos_lgn.params import ParameterError, optional, require
+from dynaphos_lgn.params import (ParameterError, class_membership, optional,
+                                 require)
 from dynaphos_lgn.receptive_fields import center_radius_deg
 from dynaphos_lgn.rendering import (EllipseGaussianRenderer, ScatterRenderer,
                                     visual_field_grid)
@@ -129,6 +130,7 @@ class LGNPhospheneSimulator:
         self.batch_size = batch_size
 
         self._warn_about_out_of_view_electrodes()
+        self._build_class_mixture()
         self._build_renderers()
         self._build_recruitment_buffers()
 
@@ -146,6 +148,7 @@ class LGNPhospheneSimulator:
         self.effective_charge_per_second = None
         self.layer_activation = None
         self.recruited_cells = None
+        self.class_fraction = None
 
         self._sampling_mask = None
         self._phosphene_maps = None
@@ -220,6 +223,35 @@ class LGNPhospheneSimulator:
                 "to see them.", int(outside.sum()), self.num_phosphenes,
                 2 * half)
 
+    def _build_class_mixture(self):
+        """Layer-to-class membership and per-class receptive-field widths
+        for the 'class_mixture' percept; no classes for 'single'."""
+        model = require(self.params, 'percept.model')
+        if model not in ('single', 'class_mixture'):
+            raise ParameterError(f"Unknown percept.model {model!r}; expected "
+                                 f"'single' or 'class_mixture'.")
+        self.classes = ([] if model == 'single'
+                        else list(require(self.params, 'percept.classes')))
+        if not self.classes:
+            return
+        array = self.array
+        membership = class_membership(self.params, array.layer_ids,
+                                      self.classes)
+        self._membership = to_tensor(membership, **self.data_kwargs)
+
+        scale = require(self.params, 'percept.rf_blur_scale')
+        form = require(self.params, 'percept.rf_form')
+        ecc = np.nan_to_num(array.eccentricity_deg)
+        self.rf_sigma_deg = np.stack(
+            [scale * center_radius_deg(ecc, self.params, c, form)
+             for c in self.classes], axis=-1) / np.sqrt(2.0)
+        self._rf_sigma = to_tensor(self.rf_sigma_deg, **self.data_kwargs)
+
+        point_layer = array.candidate_layer[:, array.scatter_index]
+        onehot = (point_layer[..., None] == array.layer_ids).astype(
+            np.float32)
+        self._point_class = onehot @ membership   # (n, points, classes)
+
     def _build_renderers(self):
         array = self.array
         mode = array.render_mode
@@ -235,17 +267,22 @@ class LGNPhospheneSimulator:
 
         self.scatter_renderer = None
         if len(self.scatter_index):
-            patch_radius = array.scatter_patch_radius_deg()[self.scatter_index]
+            idx = self.scatter_index
+            patch_radius = array.scatter_patch_radius_deg()[idx]
             ceiling_fraction = require(
                 self.params, 'rendering.scatter_bandwidth_ceiling_fraction')
+            # Room for the receptive-field widening
+            rf_sigma = (self.rf_sigma_deg[idx].max(axis=-1) if self.classes
+                        else np.zeros(len(idx)))
             self.scatter_renderer = ScatterRenderer(
-                array.scatter_points_xy[self.scatter_index],
-                array.vf_xy[self.scatter_index],
+                array.scatter_points_xy[idx],
+                array.vf_xy[idx],
                 self.params,
-                patch_radius,
-                array.scatter_bandwidth_floor_deg[self.scatter_index],
+                patch_radius + 3 * rf_sigma,
+                array.scatter_bandwidth_floor_deg[idx],
                 ceiling_fraction * patch_radius,
-                self.data_kwargs)
+                self.data_kwargs,
+                extra_blur_deg=float(rf_sigma.max()))
 
     def _build_recruitment_buffers(self):
         array = self.array
@@ -257,6 +294,10 @@ class LGNPhospheneSimulator:
         self._layer_cells = to_tensor(hist['cells'], **self.data_kwargs)
 
         if len(self.scatter_index):
+            if self.classes:
+                self._scatter_point_class = to_tensor(
+                    self._point_class[self.scatter_index],
+                    **self.data_kwargs)
             self._scatter_distance = to_tensor(
                 array.scatter_distance_mm, **self.data_kwargs)
             self._scatter_mask = to_tensor(
@@ -339,6 +380,11 @@ class LGNPhospheneSimulator:
         self.size.update(amplitude_ua)
         self.layer_activation, self.recruited_cells = \
             self.recruitment(amplitude_ua)
+        if self.classes:
+            class_cells = self.recruited_cells @ self._membership
+            total = class_cells.sum(dim=-1, keepdim=True)
+            self.class_fraction = class_cells / torch.clamp(
+                total, min=torch.finfo(total.dtype).tiny)
         self.brightness.update(self.activation.get())
         self._last_amplitude_ua = amplitude_ua
 
@@ -349,32 +395,50 @@ class LGNPhospheneSimulator:
         lead = self.shape[:-3]
         out = torch.zeros((*lead, self.num_phosphenes, res_y, res_x),
                           **self.data_kwargs)
+        dim = self._electrode_dimension
 
         if self.ellipse_renderer is not None:
             idx = torch.as_tensor(self.ellipse_index,
                                   device=out.device, dtype=torch.long)
-            sa = self.size.sigma_major.index_select(
-                self._electrode_dimension, idx)
-            sb = self.size.sigma_minor.index_select(
-                self._electrode_dimension, idx)
-            rendered = self.ellipse_renderer.render(sa, sb)
-            out = out.index_copy(self._electrode_dimension, idx, rendered)
+            sa = self.size.sigma_major.index_select(dim, idx)
+            sb = self.size.sigma_minor.index_select(dim, idx)
+
+            def render_ellipse(rf, c):
+                rf = None if rf is None else rf[:, None, None]
+                return self.ellipse_renderer.render(_widen(sa, rf),
+                                                    _widen(sb, rf))
+            out = out.index_copy(dim, idx, self._mix(idx, render_ellipse))
 
         if self.scatter_renderer is not None:
             idx = torch.as_tensor(self.scatter_index,
                                   device=out.device, dtype=torch.long)
-            amp = self._last_amplitude_ua.index_select(
-                self._electrode_dimension, idx).reshape(
+            amp = self._last_amplitude_ua.index_select(dim, idx).reshape(
                 *lead, len(self.scatter_index), 1)
             w = self.kernel.weights(self._scatter_distance, amp)
             w = w * self._scatter_mask
-            h = self.scatter_renderer.bandwidth_deg(
-                w, self._scatter_points,
-                adaptive=self.adaptive_scatter_bandwidth)
-            rendered = self.scatter_renderer.render(w, h)
-            out = out.index_copy(self._electrode_dimension, idx, rendered)
+
+            def render_scatter(rf, c):
+                weights = w if c is None else w * self._scatter_point_class[
+                    ..., c]
+                h = self.scatter_renderer.bandwidth_deg(
+                    weights, self._scatter_points,
+                    adaptive=self.adaptive_scatter_bandwidth)
+                return self.scatter_renderer.render(weights, _widen(h, rf))
+            out = out.index_copy(dim, idx, self._mix(idx, render_scatter))
 
         return out
+
+    def _mix(self, idx: torch.Tensor, render) -> torch.Tensor:
+        """`render(rf_sigma, class_index)` for the electrodes `idx`: once,
+        class-blind, for the 'single' percept; otherwise summed over the
+        classes, weighted by each one's share of the recruited cells."""
+        if not self.classes:
+            return render(None, None)
+        fraction = self.class_fraction.index_select(
+            self._electrode_dimension, idx)
+        rf_sigma = self._rf_sigma.index_select(0, idx)
+        return sum(fraction[..., c, None, None] * render(rf_sigma[:, c], c)
+                   for c in range(len(self.classes)))
 
     def __call__(self, amplitude: torch.Tensor,
                  pulse_width: Optional[torch.Tensor] = None,
@@ -492,6 +556,7 @@ class LGNPhospheneSimulator:
             'effective_charge_per_second': self.effective_charge_per_second,
             'layer_activation': self.layer_activation,
             'recruited_cells': self.recruited_cells,
+            'class_fraction': self.class_fraction,
         }
 
     def layer_activation_table(self) -> Dict[str, np.ndarray]:
@@ -502,6 +567,24 @@ class LGNPhospheneSimulator:
         return {name: values[..., i]
                 for i, name in enumerate(self.layer_names)}
 
+    def class_fraction_table(self) -> Dict[str, np.ndarray]:
+        """Last frame's share of recruited cells, keyed by percept class."""
+        if self.class_fraction is None:
+            raise RuntimeError("Needs percept.model 'class_mixture' and at "
+                               "least one call of the simulator.")
+        values = to_numpy(self.class_fraction.detach())
+        return {name: values[..., i] for i, name in enumerate(self.classes)}
+
     def describe(self) -> str:
         """The electrode array's configuration and per-electrode flags."""
         return self.array.describe()
+
+
+def _widen(sigma: torch.Tensor, extra: Optional[torch.Tensor]
+           ) -> torch.Tensor:
+    """The width of a Gaussian of width `sigma` blurred by one of width
+    `extra`; `sigma` itself when `extra` is None."""
+    if extra is None:
+        return sigma
+    # `tiny` keeps the gradient finite where both widths are zero
+    return torch.sqrt(sigma ** 2 + extra ** 2 + torch.finfo(sigma.dtype).tiny)

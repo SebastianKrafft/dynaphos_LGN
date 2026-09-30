@@ -79,11 +79,13 @@ class SyntheticAtlas(ErwinAtlas):
         incl_deg = np.broadcast_to(incl_deg, self.atlas_shape)
         valid = np.broadcast_to(inside & ~in_gap, self.atlas_shape)
 
+        # The gaps carry retinotopy but no layer, like the real atlas's
+        # interlaminar zones.
         self.eccentricity = np.where(
-            valid, np.round(ecc_deg * self._ecc_scale),
+            inside, np.round(ecc_deg * self._ecc_scale),
             self._missing_ecc_incl).astype(np.int16)
         self.inclination = np.where(
-            valid, np.round(incl_deg * self._incl_scale),
+            inside, np.round(incl_deg * self._incl_scale),
             self._missing_ecc_incl).astype(np.int16)
         self.layer = layer
 
@@ -94,9 +96,7 @@ class SyntheticAtlas(ErwinAtlas):
         cells = np.where(valid, np.clip(density * jitter, 0, None), 0.0)
         self.cells = np.round(cells * self._cells_scale).astype(np.int16)
 
-        self.valid = ((self.eccentricity != self._missing_ecc_incl)
-                      & (self.inclination != self._missing_ecc_incl)
-                      & (self.layer != self._missing_layer))
+        self.update_valid()
         self.eccentricity_deg = self.eccentricity / self._ecc_scale
         self.inclination_deg = self.inclination / self._incl_scale
         self.cells_per_voxel = self.cells / self._cells_scale

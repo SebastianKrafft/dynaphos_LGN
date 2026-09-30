@@ -69,10 +69,10 @@ class ErwinAtlas(Atlas):
             inclination = self.inclination
         return np.isin(inclination, self.ipsi_sentinel_values)
 
-    def eligible(self, cell_class: Optional[str] = None,
+    def eligible(self, cell_class=None,
                  exclude_ipsi: bool = False) -> np.ndarray:
-        """Valid voxels, optionally of one cell class and without the
-        ipsilateral placeholder."""
+        """Valid voxels, optionally of a cell class (or a list of them)
+        and without the ipsilateral placeholder."""
         mask = self.valid.copy()
         if cell_class is not None:
             mask &= np.isin(self.layer,
@@ -101,10 +101,7 @@ class ErwinAtlas(Atlas):
         self.inclination = load('inclination')
         self.layer = load('layer')
         self.cells = load('cells')
-
-        self.valid = (self.eccentricity != self._missing_ecc_incl) & \
-                    (self.inclination != self._missing_ecc_incl) & \
-                    (self.layer != self._missing_layer)
+        self.update_valid()
 
         self.eccentricity_deg = (self.eccentricity
                                  / np.float32(self._ecc_scale))
@@ -114,6 +111,17 @@ class ErwinAtlas(Atlas):
                                 / np.float32(self._cells_scale))
 
         return self
+
+    @property
+    def layer_codes(self) -> np.ndarray:
+        """The layer codes present on valid voxels."""
+        return np.unique(self.layer[self.valid])
+
+    def update_valid(self):
+        """Recompute `valid`: retinotopy known and a layer assigned."""
+        self.valid = ((self.eccentricity != self._missing_ecc_incl)
+                      & (self.inclination != self._missing_ecc_incl)
+                      & (self.layer != self._missing_layer))
 
     def horsley_clarke_to_index(self, ml_mm: Union[float, np.ndarray],
                                 dv_mm: Union[float, np.ndarray],
@@ -573,10 +581,7 @@ class MirroredAtlas(ErwinAtlas):
             sentinel=self._missing_ecc_incl)
         self.inclination_deg = (self.inclination
                                 / np.float32(self._incl_scale))
-
-        self.valid = (self.eccentricity != self._missing_ecc_incl) & \
-                     (self.inclination != self._missing_ecc_incl) & \
-                     (self.layer != self._missing_layer)
+        self.update_valid()
         return self
 
     @property

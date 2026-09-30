@@ -102,13 +102,16 @@ class ScatterRenderer:
     :param bandwidth_floor_deg: (n_electrodes,) lower clamp on the splat
         kernel, from the point cloud's own spacing.
     :param bandwidth_ceiling_deg: (n_electrodes,) upper clamp.
+    :param extra_blur_deg: Largest blur added on top of the clamped
+        bandwidth, e.g. a receptive field; widens the kernel cap.
     """
 
     def __init__(self, points_xy: np.ndarray, centers_xy: np.ndarray,
                  params: Mapping, patch_radius_deg: np.ndarray,
                  bandwidth_floor_deg: np.ndarray,
                  bandwidth_ceiling_deg: np.ndarray,
-                 data_kwargs: Optional[dict] = None):
+                 data_kwargs: Optional[dict] = None,
+                 extra_blur_deg: float = 0.0):
         data_kwargs = data_kwargs or {}
         self.params = params
         device = data_kwargs.get('device', None)
@@ -195,8 +198,9 @@ class ScatterRenderer:
                                                dtype=dtype)
         self.bandwidth_ceiling = torch.as_tensor(ceiling, device=device,
                                                  dtype=dtype)
-        self.max_kernel_radius_px = require(params,
-                                            'rendering.max_kernel_radius_px')
+        self.max_kernel_radius_px = (
+            require(params, 'rendering.max_kernel_radius_px')
+            + math.ceil(3 * extra_blur_deg / px_deg))
         self._smooth_clamp_softness = require(
             params, 'rendering.smooth_clamp_softness_fraction')
         self._dtype, self._device = dtype, device

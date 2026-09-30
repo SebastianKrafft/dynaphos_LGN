@@ -76,8 +76,7 @@ class TestLayerGrouping:
 
     def test_class_flags_agree_with_layer_codes(self, array, lgn_params):
         classes = lgn_params['atlas']['layers']['classes']
-        for cls, touches in (('magno', array.touches_magno),
-                             ('parvo', array.touches_parvo)):
+        for cls, touches in array.touches_class.items():
             expected = np.isin(array.candidate_layer,
                                classes[cls]).any(axis=1)
             assert np.array_equal(touches, expected)

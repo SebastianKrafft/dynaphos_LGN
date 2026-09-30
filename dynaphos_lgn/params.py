@@ -3,7 +3,9 @@
 Parameters are read with `require`, which names the missing dotted path
 instead of falling back to a default in code.
 """
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Sequence, Union
+
+import numpy as np
 
 
 class ParameterError(KeyError):
@@ -48,18 +50,36 @@ def optional(params: Mapping, path: str, default: Any = None) -> Any:
     return default if value is None else value
 
 
-def resolve_class_codes(params: Mapping, cell_class: Optional[str]
-                        ) -> Sequence[int]:
-    """LAYERS.DAT codes belonging to a cell class, or all of them.
+def class_codes(params: Mapping) -> dict:
+    """{name: layer codes} for every class and subclass in the config."""
+    return {**require(params, 'atlas.layers.classes'),
+            **optional(params, 'atlas.layers.subclasses', {})}
 
-    :param cell_class: 'magno', 'parvo', or None for every laminar code
-        the config defines.
+
+def resolve_class_codes(params: Mapping,
+                        cell_class: Union[None, str, Sequence[str]]
+                        ) -> Sequence[int]:
+    """Layer codes of a cell class, a list of classes, or (None) all.
+
+    :param cell_class: A class or subclass name from `atlas.layers`, a
+        list of them, or None for every laminar code the config defines.
     """
-    classes = require(params, 'atlas.layers.classes')
+    classes = class_codes(params)
     if cell_class is None:
-        return sorted({code for codes in classes.values() for code in codes})
-    if cell_class not in classes:
+        cell_class = list(require(params, 'atlas.layers.classes'))
+    names = [cell_class] if isinstance(cell_class, str) else list(cell_class)
+    unknown = [name for name in names if name not in classes]
+    if unknown:
         raise ParameterError(
-            f"Unknown cell class {cell_class!r}; atlas.layers.classes "
-            f"defines {', '.join(sorted(classes))}.")
-    return list(classes[cell_class])
+            f"Unknown cell class {unknown}; atlas.layers defines "
+            f"{', '.join(sorted(classes))}.")
+    return sorted({code for name in names for code in classes[name]})
+
+
+def class_membership(params: Mapping, layer_codes: Sequence[int],
+                     classes: Sequence[str]) -> np.ndarray:
+    """(n_layers, n_classes) 0/1 matrix: which layer belongs to which
+    class."""
+    return np.array([[code in resolve_class_codes(params, name)
+                      for name in classes] for code in layer_codes],
+                    dtype=np.float32)

@@ -36,6 +36,7 @@ amplitude, pulse width, frequency
 | `synthetic_atlas.py` | a small closed-form stand-in, so tests and demos run without the atlas download |
 | `magnification.py` | Malpeli et al. (1996) densities; the magnification models (Jacobian, atlas-gradient, anisotropic-gradient, density-derived) |
 | `receptive_fields.py` | difference-of-Gaussians centre and surround sizes by cell class |
+| `konio.py` | koniocellular layers K1-K6 labelled in the atlas's interlaminar zones |
 | `current_spread.py` | Stoney/Tehovnik law, smooth recruitment kernels, the multi-electrode threshold-reduction bound |
 | `electrodes.py` | setup-time geometry: voxel lookup, candidate gather, layer grouping, per-electrode flags |
 | `rendering.py` | the elliptical-Gaussian and per-voxel scatter renderers |
@@ -118,6 +119,34 @@ compares the percept of one nucleus with that of both.
 `examples/demo_simulator_lgn.ipynb` is the long walkthrough and
 `examples/demo_simulator_lgn_simple.ipynb` the short one.
 
+## Koniocellular layers
+
+The atlas labels only the magno and parvo laminae, but its interlaminar
+zones carry retinotopy. With `konio.enabled`, these are labelled K1-K6
+(Kn lies just ventral to principal layer n) and given 10% of all cells,
+spread uniformly. Their median thickness is 100 um, as reported for K
+layers. The Jacobian is then fitted with them included and cached as
+`JACOBIAN_KONIO.npz` (`python -m dynaphos_lgn.build --cache-jacobian
+--konio`).
+
+Cell classes only change the percept with the class-mixture model:
+
+```yaml
+percept:
+  model: class_mixture          # single (default) | class_mixture
+  classes: [magno, parvo, konio]   # or konio_ventral, konio_dorsal
+```
+
+Each phosphene is then a sum of one blob per class, widened by that
+class's receptive-field centre and weighted by its share of the
+recruited cells. Rendering costs about one pass per class.
+`electrodes.cell_class: [magno, parvo]` keeps the electrodes of a run
+without K.
+
+```
+python examples/demo_konio_lgn.py
+```
+
 ## Design notes
 
 * **Nothing is a hard cutoff.** The recruitment kernel, the renderer's
@@ -133,7 +162,11 @@ compares the percept of one nucleus with that of both.
 ## Known limitations
 
 * K, the rheobase and the temporal dynamics come from V1; koniocellular
-  receptive fields from owl monkey.
+  receptive fields from owl monkey (Xu et al. 2002) and marmoset (White
+  et al. 2001).
+* Koniocellular cells are speculative: uniform density, no macaque data,
+  retinotopy interpolated by the atlas. K bridges, K-o orientation
+  tuning, latency and colour are not modelled.
 * The right LGN is a mirror image of the left, not a second atlas.
 * Nothing couples the two nuclei.
 * Electrodes combine independently at render time; the multi-electrode

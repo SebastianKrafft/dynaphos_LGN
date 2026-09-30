@@ -2,17 +2,17 @@
 
 Difference-of-Gaussians centre and surround sizes by eccentricity and
 cell class: Croner & Kaplan (1995) for magno/parvo, Xu et al. (2002) for
-konio. The simulator uses them for stimulus sampling, not for phosphene
-appearance.
+konio. A subclass (e.g. konio_ventral) scales its parent's radii by
+`receptive_fields.subclass_rc_scale`.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Sequence, Union
+from typing import Mapping, Sequence, Tuple, Union
 
 import numpy as np
 
-from dynaphos_lgn.params import require
+from dynaphos_lgn.params import class_codes, optional, require
 
 ArrayLike = Union[float, np.ndarray]
 
@@ -69,6 +69,17 @@ class ReceptiveField:
                 * np.exp(-(r / rs) ** 2))
 
 
+def parent_class(cell_class: str, params: Mapping) -> Tuple[str, float]:
+    """(parent class, radius scale) of a subclass; (itself, 1) otherwise."""
+    scales = optional(params, 'receptive_fields.subclass_rc_scale', {})
+    if cell_class not in scales:
+        return cell_class, 1.0
+    codes = class_codes(params)
+    parent = next(name for name in require(params, 'atlas.layers.classes')
+                  if set(codes[cell_class]) <= set(codes[name]))
+    return parent, float(scales[cell_class])
+
+
 def center_radius_deg(eccentricity_deg: ArrayLike, params: Mapping,
                       cell_class: str = 'parvo',
                       form: str = 'exponential') -> np.ndarray:
@@ -76,11 +87,16 @@ def center_radius_deg(eccentricity_deg: ArrayLike, params: Mapping,
 
     :param eccentricity_deg: Eccentricity, degrees.
     :param params: Parameter dictionary.
-    :param cell_class: 'magno', 'parvo' or 'konio'. Defaults to 'parvo'.
+    :param cell_class: 'magno', 'parvo', 'konio' or a subclass.
+        Defaults to 'parvo'.
     :param form: 'exponential' or 'power', for the M/P classes only. The
         koniocellular fit is linear and ignores this. Defaults to
         'exponential'.
     """
+    parent, scale = parent_class(cell_class, params)
+    if parent != cell_class:
+        return scale * center_radius_deg(eccentricity_deg, params,
+                                         parent, form)
     e = np.asarray(eccentricity_deg, dtype=float)
     if cell_class == 'konio':
         k = require(params, 'receptive_fields.xu_konio')
@@ -113,6 +129,10 @@ def surround_radius_deg(eccentricity_deg: ArrayLike, params: Mapping,
     ``receptive_fields.croner_kaplan.surround_center_radius_ratio``;
     konio uses Xu et al.'s own rs(E).
     """
+    parent, scale = parent_class(cell_class, params)
+    if parent != cell_class:
+        return scale * surround_radius_deg(eccentricity_deg, params,
+                                           parent, form)
     if cell_class == 'konio':
         k = require(params, 'receptive_fields.xu_konio')
         e = np.asarray(eccentricity_deg, dtype=float)
@@ -135,6 +155,6 @@ def receptive_field(eccentricity_deg: ArrayLike, params: Mapping,
         surround_radius_deg=surround_radius_deg(
             eccentricity_deg, params, cell_class, form),
         surround_center_volume_ratio=require(
-            params,
-            f'receptive_fields.surround_center_volume_ratio.{cell_class}'),
+            params, 'receptive_fields.surround_center_volume_ratio.'
+                    + parent_class(cell_class, params)[0]),
         cell_class=cell_class)

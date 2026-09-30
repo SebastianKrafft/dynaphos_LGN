@@ -22,10 +22,12 @@ from dynaphos_lgn.magnification import (JacobianMagnification,
 from dynaphos_lgn.params import require
 
 
-def layer_names(params: Mapping) -> dict:
-    """{code: name} from `atlas.layers.names`."""
+def layer_names(params: Mapping, present=None) -> dict:
+    """{code: name} from `atlas.layers.names`, optionally only for the
+    codes in `present`."""
     return {int(code): name for code, name
-            in require(params, 'atlas.layers.names').items()}
+            in require(params, 'atlas.layers.names').items()
+            if present is None or int(code) in present}
 
 
 @dataclass
@@ -37,8 +39,8 @@ class ElectrodeFlags:
         be extrapolated across the footprint; rendered by scatter.
     :ivar touches_placeholder: The candidate neighbourhood includes
         placeholder or ipsilateral-sentinel voxels.
-    :ivar class_heterogeneous: The neighbourhood spans magno and parvo
-        tissue.
+    :ivar class_heterogeneous: The neighbourhood spans more than one
+        cell class.
     :ivar scalar_magnification: Sized by a table/scalar model rather than
         the per-voxel Jacobian.
     """
@@ -62,7 +64,7 @@ class ElectrodeFlags:
                  self.unreliable_beyond_neighborhood),
                 ('footprint touches placeholder/sentinel voxels',
                  self.touches_placeholder),
-                ('footprint spans both magno and parvo tissue',
+                ('footprint spans more than one cell class',
                  self.class_heterogeneous),
                 ('sized by scalar magnification (forced circular)',
                  self.scalar_magnification)]
@@ -311,7 +313,8 @@ class LGNElectrodeArray:
         self.candidate_vf_xy = np.stack([vf_x, vf_y], axis=-1)
         self.candidate_cells_per_voxel = np.where(valid, cells, 0.0)
 
-        self.layer_names_by_code = layer_names(self.params)
+        self.layer_names_by_code = layer_names(self.params,
+                                               atlas.layer_codes)
         self.layer_ids = np.array(sorted(self.layer_names_by_code),
                                   dtype=np.int8)
         self.candidate_layer_onehot = (
@@ -319,8 +322,8 @@ class LGNElectrodeArray:
             np.float32)
 
         classes = require(self.params, 'atlas.layers.classes')
-        self.touches_magno = np.isin(layer, classes['magno']).any(axis=1)
-        self.touches_parvo = np.isin(layer, classes['parvo']).any(axis=1)
+        self.touches_class = {name: np.isin(layer, codes).any(axis=1)
+                              for name, codes in classes.items()}
 
     def _resolve_magnification(self, jacobian_atlas, magnification_model):
         """Local magnification at each electrode centre, plus flags."""
@@ -366,7 +369,8 @@ class LGNElectrodeArray:
                 local.unreliable_beyond_neighborhood, dtype=bool),
             touches_placeholder=np.any(
                 ~self.candidate_valid, axis=1),
-            class_heterogeneous=self.touches_magno & self.touches_parvo,
+            class_heterogeneous=np.sum(list(self.touches_class.values()),
+                                       axis=0) > 1,
             scalar_magnification=scalar_fallback)
 
     def _select_scatter_points(self, n_scatter_points: int):

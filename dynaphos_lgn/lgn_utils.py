@@ -11,7 +11,7 @@ from dynaphos.utils import Map, polar_to_complex
 
 def get_electrode_layout(atlas,
                          n_electrodes: int,
-                         cell_class: Optional[str] = None,
+                         cell_class=None,
                          min_eccentricity: float = 0.0,
                          max_eccentricity: Optional[float] = None,
                          bin_size_deg: float = 1.0,
@@ -24,8 +24,8 @@ def get_electrode_layout(atlas,
 
     :param atlas: A built `ErwinAtlas`.
     :param n_electrodes: Number of electrodes to place.
-    :param cell_class: Restrict placement to 'parvo', 'magno', or None
-        (both, the default).
+    :param cell_class: Restrict placement to a cell class or a list of
+        them; None (the default) allows all tissue.
     :param min_eccentricity: Lower eccentricity bound, degrees.
     :param max_eccentricity: Upper bound, degrees. None (default) uses
         the maximum available under the other constraints.

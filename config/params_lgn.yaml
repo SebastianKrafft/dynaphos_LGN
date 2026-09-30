@@ -34,6 +34,7 @@ display:
 atlas:
   directory: data/Erwin_Atlas
   jacobian_cache: JACOBIAN.npz
+  jacobian_cache_konio: JACOBIAN_KONIO.npz   # fit including K layers
 
   shape_ml_dv_ap: [240, 280, 320]
   voxel_size_mm: 0.025
@@ -91,9 +92,23 @@ atlas:
       2: magno_ipsi
       3: parvo_ipsi
       4: parvo_contra
+      # Koniocellular layers K1-K6, labelled in the interlaminar zones
+      # at load time when konio.enabled (not stored in LAYERS.DAT).
+      5: konio_1
+      6: konio_2
+      7: konio_3
+      8: konio_4
+      9: konio_5
+      10: konio_6
     classes:
       magno: [1, 2]
       parvo: [3, 4]
+      konio: [5, 6, 7, 8, 9, 10]
+    # Groupings within a class. Ventral K1-K2 and dorsal K3-K6 differ in
+    # their V1 axon arbors (Casagrande et al. 2007).
+    subclasses:
+      konio_ventral: [5, 6]
+      konio_dorsal: [7, 8, 9, 10]
     eyes:
       contra: [1, 4]
       ipsi: [2, 3]
@@ -120,6 +135,18 @@ atlas:
     svd_chunk_size: 2000000
 
 # ----------------------------------------------------------------------
+# Koniocellular layers (speculative; no macaque K density data exists)
+# ----------------------------------------------------------------------
+konio:
+  enabled: False
+  # K share of all LGN cells: P 80%, M 10%, K 10% (Connolly & Van Essen
+  # 1984; Hendry 1995), spread uniformly over the K voxels.
+  fraction_of_total: 0.10
+  # Longer interlaminar runs are hilum or fibre bundles, not K layers.
+  # K layers are ~100 um thick (Kaas et al. 1978).
+  max_run_thickness_vox: 12     # 300 um
+
+# ----------------------------------------------------------------------
 # Synthetic stand-in atlas, for tests and demos without the real data
 # ----------------------------------------------------------------------
 synthetic_atlas:
@@ -141,7 +168,8 @@ electrodes:
   n_electrodes_by_hemisphere:   # null: use n_electrodes
     left: null
     right: null
-  cell_class: null              # null | parvo | magno
+  cell_class: null              # null (all tissue) | a class or subclass
+                                # | a list, e.g. [magno, parvo]
   min_eccentricity_deg: 0.0
   max_eccentricity_deg: 20.0
   bin_size_deg: 0.5
@@ -236,7 +264,7 @@ magnification:
 # Receptive fields
 # ----------------------------------------------------------------------
 receptive_fields:
-  cell_classes: [magno, parvo, konio]
+  cell_classes: [magno, parvo, konio, konio_ventral, konio_dorsal]
 
   # Fits to digitised Croner & Kaplan (1995) Fig. 4.
   croner_kaplan:
@@ -263,6 +291,13 @@ receptive_fields:
     rs_below_15deg: [0.91, 0.10]    # linear fits
     rs_over_rc_below_15deg: 3.61
 
+  # Subclasses use their parent's fit times this scale: White et al.
+  # (2001, marmoset) ventral 0.36 deg and dorsal 0.22 deg centres,
+  # relative to their geometric mean.
+  subclass_rc_scale:
+    konio_ventral: 1.28
+    konio_dorsal: 0.78
+
   # Integrated surround/centre ratio (Ks*rs^2)/(Kc*rc^2), not the peak
   # ratio Ks/Kc.
   surround_center_volume_ratio:
@@ -277,6 +312,16 @@ size:
   # Used by the V1 simulator only; the LGN path derives sigma from
   # current_spread.contour_value.
   radius_to_sigma: 0.5
+
+# How recruited cell classes combine into a phosphene.
+#   single         one blob per electrode, class-blind
+#   class_mixture  one blob per class, widened by that class's receptive-
+#                  field centre and weighted by its share of recruited cells
+percept:
+  model: single                 # single | class_mixture
+  classes: [magno, parvo, konio]
+  rf_blur_scale: 1.0            # multiplier on the RF centre sigma
+  rf_form: exponential          # exponential | power (M/P fits)
 
 rendering:
   adaptive_scatter_bandwidth: True

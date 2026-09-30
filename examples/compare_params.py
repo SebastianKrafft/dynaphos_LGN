@@ -104,6 +104,21 @@ CONDITIONS = {
     'hard_threshold': {'thresholding.soft_threshold': False},
     'soft_no_baseline': {'thresholding.soft_threshold_baseline': 'none'},
 }
+
+# Koniocellular layers (speculative). These share one atlas, Jacobian and
+# set of M/P electrodes; the key contrast is mix_mp vs mix_mpk.
+KONIO = {'konio.enabled': True, 'electrodes.cell_class': ['magno', 'parvo']}
+MIXTURE = {**KONIO, 'percept.model': 'class_mixture'}
+CONDITIONS.update({
+    'konio_single': KONIO,
+    'mix_mp': {**MIXTURE, 'percept.classes': ['magno', 'parvo']},
+    'mix_mpk': MIXTURE,
+    'mix_mpk_split': {**MIXTURE, 'percept.classes': [
+        'magno', 'parvo', 'konio_ventral', 'konio_dorsal']},
+    'mix_mpk_rf_x2': {**MIXTURE, 'percept.rf_blur_scale': 2.0},
+    # Electrodes may also land in K layers
+    'konio_sites': {**MIXTURE, 'electrodes.cell_class': None},
+})
 # -------------------------------------------------------------------------
 
 MNIST_URL = 'https://ossci-datasets.s3.amazonaws.com/mnist/'
