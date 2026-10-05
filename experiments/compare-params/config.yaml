@@ -1,0 +1,42 @@
+# Conditions for compare_params.py, applied on top of config/params_lgn.yaml.
+# name -> {dotted config path: value}. Every path must already exist in
+# the config: a typo fails loudly instead of silently adding a key.
+
+# Koniocellular layers (speculative). These share one atlas, Jacobian and
+# set of M/P electrodes; the key contrast is mix_mp vs mix_mpk.
+konio: &konio
+  cell_classes: [magno, parvo, konio]
+  electrodes.cell_class: [magno, parvo]
+mixture: &mixture
+  <<: *konio
+  percept.model: class_mixture
+
+conditions:
+  baseline: {}
+  # K is transplanted from macaque V1; halve and double it.
+  # K_x0.5: {current_spread.k_ua_per_mm2: 337.5}
+  # K_x2: {current_spread.k_ua_per_mm2: 1350.0}
+  bosking_spread: {current_spread.spread_model: bosking}
+  # The four magnification models (baseline is 'jacobian').
+  mag_atlas_gradient: {magnification.model: atlas_gradient}
+  mag_anisotropic: {magnification.model: anisotropic_gradient}
+  mag_malpeli_density: {magnification.model: malpeli_density}
+  # Threshold form.
+  hard_threshold: {thresholding.soft_threshold: False}
+  soft_no_baseline: {thresholding.soft_threshold_baseline: none}
+
+  konio_single: *konio
+  mix_mp:
+    <<: *mixture
+    percept.classes: [magno, parvo]
+  mix_mpk: *mixture
+  mix_mpk_split:
+    <<: *mixture
+    percept.classes: [magno, parvo, konio_ventral, konio_dorsal]
+  mix_mpk_rf_x2:
+    <<: *mixture
+    percept.rf_blur_scale: 2.0
+  # Electrodes may also land in K layers
+  konio_sites:
+    <<: *mixture
+    electrodes.cell_class: null

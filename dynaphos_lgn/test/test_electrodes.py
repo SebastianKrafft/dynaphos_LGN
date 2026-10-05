@@ -5,18 +5,13 @@ import numpy as np
 import pytest
 
 from dynaphos_lgn.current_spread import RecruitmentKernel
-from dynaphos_lgn.electrodes import LGNElectrodeArray, layer_to_class
+from dynaphos_lgn.electrodes import LGNElectrodeArray
 
 
 @pytest.fixture(scope='module')
 def array_params(lgn_params):
-    """The shared config with this module's electrode knobs set.
-
-    The array reads every one of them from the config now, so a test
-    that wants a different current ceiling or field extent says so here
-    rather than passing it in. Module-scoped, hence the deep copy: the
-    `lgn_params` fixture is shared with every other test file.
-    """
+    """The shared config with this module's electrode settings (a deep
+    copy, since `lgn_params` is shared)."""
     params = copy.deepcopy(lgn_params)
     params['electrodes']['max_current_ua'] = 80.0
     params['electrodes']['max_eccentricity_deg'] = 12.0
@@ -79,11 +74,12 @@ class TestLayerGrouping:
         assert np.all(totals[array.candidate_valid] == 1)
         assert np.all(totals[~array.candidate_valid] == 0)
 
-    def test_class_labels_agree_with_layer_codes(self, array, lgn_params):
-        for code, cls in layer_to_class(lgn_params).items():
-            sel = array.candidate_layer == code
-            assert np.all(array.candidate_class[sel]
-                          == array.class_codes[cls])
+    def test_class_flags_agree_with_layer_codes(self, array, lgn_params):
+        classes = lgn_params['atlas']['layers']['classes']
+        for cls, touches in array.touches_class.items():
+            expected = np.isin(array.candidate_layer,
+                               classes[cls]).any(axis=1)
+            assert np.array_equal(touches, expected)
 
     def test_histogram_counts_match_a_direct_count(self, array):
         """The histogram is a performance shortcut, so it has to be

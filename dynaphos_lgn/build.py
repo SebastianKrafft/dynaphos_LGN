@@ -1,29 +1,13 @@
 """One-call assembly of a configured LGN simulator.
 
-`build_simulator(params)` walks the config in `config/params_lgn.yaml`
-and wires up atlas -> Jacobian -> magnification -> electrodes ->
-recruitment kernel -> simulator, caching the expensive Jacobian
-computation to disk on the way. Every intermediate object is returned
-alongside the simulator, so a script that wants to inspect or replace
-one of them does not have to rebuild the rest.
+`build_simulator(params)` wires up atlas -> Jacobian -> magnification ->
+electrodes -> kernel -> simulator and returns every intermediate object
+alongside the simulator.
 
-Run as a script, this builds the **Jacobian cache** -- the one setup step
-that is genuinely expensive and that everything else depends on::
+Run as a script to build the Jacobian cache (a few minutes, ~4 GB RAM)
+and print a validation report against Erwin et al. (1999)::
 
     python -m dynaphos_lgn.build --cache-jacobian
-
-It reads the four .DAT files, fits a local linear tissue ->
-visual-field map at every valid voxel, writes ``JACOBIAN.npz`` beside
-the atlas, and prints a validation report against Erwin et al. (1999)'s
-published totals. Expect a few minutes, several GB of peak RAM and a
-~110 MB cache. The report matters as much as the cache: a silently
-mis-read atlas shows up there as a wrong total rather than as plausible
-nonsense downstream.
-
-There is one cache however many nuclei you simulate. The right LGN is
-the left one reflected, and reflecting a Jacobian is re-indexing plus a
-sign pattern -- so it is derived from this cache at build time rather
-than fitted again.
 """
 from __future__ import annotations
 
@@ -42,38 +26,26 @@ from dynaphos_lgn.bilateral import (BilateralLGNSimulator,
                                     split_targets_by_hemifield)
 from dynaphos_lgn.current_spread import RecruitmentKernel
 from dynaphos_lgn.electrodes import LGNElectrodeArray
+from dynaphos_lgn.konio import add_konio_layers, konio_enabled, konio_report
 from dynaphos_lgn.magnification import (AnisotropicGradientMagnification,
                                         AtlasGradientMagnification,
                                         JacobianMagnification,
                                         MalpeliDensityMagnification,
-                                        MirroredMagnification)
+                                        MirroredMagnification,
+                                        isotropic_construction_radius_deg)
 from dynaphos_lgn.params import optional, require, resolve_class_codes
 from dynaphos_lgn.simulator import LGNPhospheneSimulator
 
 
-def load_lgn_params(path: Union[str, Path]) -> dict:
-    """Load a params YAML (thin alias, kept so callers need one import)."""
-    return load_params(str(path))
-
-
 def atlas_file_specs(params: Mapping) -> dict:
-    """{filename: bytes_per_voxel} from `atlas.files`.
-
-    LAYERS.DAT is the odd one out at one byte, and a headerless read at
-    the wrong width silently succeeds -- so `check_atlas_files` measures
-    each file rather than trusting the config.
-    """
+    """{filename: bytes_per_voxel} from `atlas.files`."""
     return {spec['name']: spec['bytes_per_voxel']
             for spec in require(params, 'atlas.files').values()}
 
 
 def check_atlas_files(directory: Union[str, Path], params: Mapping) -> str:
-    """Verify each .DAT file's size against the dtype it is read with.
-
-    A headerless binary read at the wrong width does not fail -- it
-    silently produces a differently-shaped, entirely wrong volume. This
-    is the cheapest possible check that it has not happened.
-    """
+    """Check each .DAT file's size against the dtype it is read with,
+    since a headerless read at the wrong width does not fail."""
     directory = Path(directory)
     n_voxels = int(np.prod(require(params, 'atlas.shape_ml_dv_ap')))
     specs = atlas_file_specs(params)
@@ -98,25 +70,25 @@ def check_atlas_files(directory: Union[str, Path], params: Mapping) -> str:
                      f"(expected {expected:,})  {verdict}")
     if not ok:
         lines.append("")
-        lines.append("  A size mismatch means the file is being read at the "
-                     "wrong width. Everything downstream would be wrong "
-                     "without erroring, so fix this before going further.")
+        lines.append("  A size mismatch means the file is read at the wrong "
+                     "width; fix this before going further.")
     return '\n'.join(lines)
 
 
 def build_atlas(params: dict, atlas_dir: Optional[Union[str, Path]] = None,
                 synthetic: bool = False,
                 fallback_to_synthetic: bool = True):
-    """Load the real atlas, or build a synthetic stand-in.
+    """Load the real atlas, or the synthetic stand-in, with K layers
+    added when `cell_classes` includes konio.
 
-    Falls back to the synthetic atlas -- loudly -- when the real files
-    are absent, so a fresh checkout can still run the demo. Anything
-    produced that way is a code check, not a result.
-
-    :param fallback_to_synthetic: Set False where a synthetic result
-        would be worse than no result, such as building the Jacobian
-        cache -- falling back would write a file that looks real.
+    :param fallback_to_synthetic: Use the synthetic atlas, with a
+        warning, when the real files are missing.
     """
+    atlas = _load_atlas(params, atlas_dir, synthetic, fallback_to_synthetic)
+    return add_konio_layers(atlas, params) if konio_enabled(params) else atlas
+
+
+def _load_atlas(params, atlas_dir, synthetic, fallback_to_synthetic):
     if synthetic:
         from dynaphos_lgn.synthetic_atlas import SyntheticAtlas
         return SyntheticAtlas(params)
@@ -131,30 +103,29 @@ def build_atlas(params: dict, atlas_dir: Optional[Union[str, Path]] = None,
                 f"the four .DAT files from malpeli.psychology.illinois.edu/"
                 f"atlas and put them there, or point --atlas-dir at them.")
         logging.warning(
-            "Atlas files %s not found in %s -- falling back to the SYNTHETIC "
-            "atlas. Output will exercise the code but means nothing "
-            "biologically.", missing, directory)
+            "Atlas files %s not found in %s -- falling back to the "
+            "synthetic atlas.", missing, directory)
         from dynaphos_lgn.synthetic_atlas import SyntheticAtlas
         return SyntheticAtlas(params)
 
     return ErwinAtlas(params).build_atlas(directory)
 
 
+def jacobian_cache_name(params: Mapping) -> str:
+    """The cache file: K layers change which voxels are fitted."""
+    key = ('atlas.jacobian_cache_konio' if konio_enabled(params)
+           else 'atlas.jacobian_cache')
+    return require(params, key)
+
+
 def build_jacobian(params: dict, atlas, cache_dir=None,
                    recompute: bool = False) -> JacobianAtlas:
-    """Load the cached per-voxel Jacobian, or compute and cache it.
-
-    On the real atlas this is a few minutes of work and a ~109 MB
-    compressed cache, so it is emphatically a build-time step, not
-    something to redo per run.
-    """
-    # Every fit parameter comes from `atlas.jacobian`; JacobianAtlas
-    # reads them itself, so nothing is duplicated here.
+    """Load the cached per-voxel Jacobian, or compute and cache it."""
     if getattr(atlas, 'is_synthetic', False) or cache_dir is None:
         return JacobianAtlas(params).compute(atlas)
 
     cache_dir = Path(cache_dir)
-    path = cache_dir / require(params, 'atlas.jacobian_cache')
+    path = cache_dir / jacobian_cache_name(params)
     if path.exists() and not recompute:
         logging.info("Loading cached Jacobian atlas from %s.", path)
         return JacobianAtlas.load(path, params)
@@ -167,22 +138,12 @@ def build_jacobian(params: dict, atlas, cache_dir=None,
 
 
 # ======================================================================
-# Hemispheres
+# Hemispheres: the right nucleus is the left atlas and Jacobian mirrored
 # ======================================================================
-# The published atlas is one LEFT LGN, which represents the RIGHT
-# hemifield. The right nucleus is that same volume reflected, not a
-# second dataset -- `dynaphos_lgn.atlas.MirroredAtlas` says what that
-# assumes. Both nuclei share the left one's atlas load and its cached
-# Jacobian fit; reflecting is re-indexing, and refitting would spend
-# another ~90 s and ~4.2 GB reproducing numbers that follow exactly.
 
 
 def configured_hemispheres(params: Mapping) -> list:
-    """The nuclei `atlas.hemispheres` asks for, validated and ordered.
-
-    Left first when both are present, so electrode numbering is
-    predictable.
-    """
+    """The nuclei `atlas.hemispheres` asks for, validated, left first."""
     names = require(params, 'atlas.hemispheres')
     if isinstance(names, str):
         names = [names]
@@ -201,13 +162,8 @@ def configured_hemispheres(params: Mapping) -> list:
 
 
 def n_electrodes_for(params: Mapping, hemisphere: str) -> int:
-    """How many electrodes go in one nucleus.
-
-    `electrodes.n_electrodes` is the per-nucleus count;
-    `electrodes.n_electrodes_by_hemisphere` overrides it for one side,
-    for an implant that is not symmetric. A null there means "use the
-    shared value", which is why this reads through `optional`.
-    """
+    """`electrodes.n_electrodes_by_hemisphere` for this nucleus, or
+    `electrodes.n_electrodes` when that is null."""
     override = optional(
         params, f'electrodes.n_electrodes_by_hemisphere.{hemisphere}')
     if override is not None:
@@ -235,11 +191,8 @@ def build_kernel(params: dict) -> RecruitmentKernel:
 
 
 def build_magnification_model(params: dict, atlas, jacobian_atlas):
-    """Whichever magnification model the config asks for.
-
-    The tables are built from the voxels of `electrodes.cell_class`, so
-    a magno array is not sized from parvocellular tissue.
-    """
+    """The `magnification.model` the config asks for, tabulated from the
+    voxels of `electrodes.cell_class`."""
     choice = require(params, 'magnification.model')
     cell_class = require(params, 'electrodes.cell_class')
     if choice == 'jacobian':
@@ -265,25 +218,8 @@ def build_electrode_array(params: dict, atlas, jacobian_atlas,
                           n_electrodes: Optional[int] = None,
                           magnification_model=None
                           ) -> LGNElectrodeArray:
-    # Everything else (I_max, tail weight, budgets, scatter points, cell
-    # class, sentinel handling) is read from the config by
-    # LGNElectrodeArray itself, so there is exactly one place each value
-    # lives.
-    #
-    # `magnification_model` has to reach the CONSTRUCTOR, not be attached
-    # afterwards: `_resolve_magnification` only fills per-voxel Jacobian
-    # gaps from the scalar model when it receives both, and it runs
-    # during __init__. Assigning the attribute later leaves those
-    # electrodes with a NaN magnification and no phosphene.
-    #
-    # `_resolve_magnification` treats `jacobian_atlas` as authoritative
-    # whenever it is given, using `magnification_model` only to fill the
-    # gaps it leaves -- so passing both here would make `magnification.
-    # model` a near-no-op for every choice except 'jacobian' itself, and
-    # defeat the whole point of the cheaper table-based models (a config
-    # switch that silently keeps paying for per-voxel Jacobian lookups).
-    # Pass the raw Jacobian atlas through only when the config actually
-    # asked for it; otherwise the chosen model is the sole source.
+    # The Jacobian atlas takes precedence over the model wherever it is
+    # given, so pass it only when the config asks for 'jacobian'.
     choice = require(params, 'magnification.model')
     common = dict(kernel=kernel,
                   jacobian_atlas=jacobian_atlas if choice == 'jacobian' else None,
@@ -310,23 +246,19 @@ def build_simulator(params: dict, atlas_dir=None, synthetic: bool = False,
                                      BilateralLGNSimulator], dict]:
     """Assemble a simulator from a parameter dict.
 
-    How much of the visual field it covers is `atlas.hemispheres`'s
-    decision. One nucleus gives one hemifield and an
-    `LGNPhospheneSimulator`, exactly as before this key existed; both
-    give the whole field and a `BilateralLGNSimulator` that sums them.
+    One nucleus in `atlas.hemispheres` gives an `LGNPhospheneSimulator`,
+    two give a `BilateralLGNSimulator`; both expose the same
+    per-electrode views.
 
     :param hemispheres: Override `atlas.hemispheres` for this build.
-    :param voxel_indices: Explicit electrode voxels. With two nuclei the
-        indices are per-nucleus and so ambiguous on their own -- pass
-        ``{'left': ..., 'right': ...}`` instead.
+    :param voxel_indices: Explicit electrode voxels; with two nuclei a
+        ``{'left': ..., 'right': ...}`` dict.
     :param visual_field_targets: ``(eccentricity, inclination)`` percept
-        locations. With two nuclei each target is routed to the nucleus
-        whose hemifield it falls in.
-    :return: (simulator, parts). For one hemisphere `parts` holds the
-        atlas, Jacobian atlas, kernel, magnification model and electrode
-        array as it always has. For two it holds the shared `kernel` and
-        a `hemispheres` dict of that same set per nucleus, plus
-        `simulators`.
+        locations, routed to the nucleus whose hemifield they fall in.
+    :return: (simulator, parts). `parts['hemispheres']` maps each nucleus
+        to its atlas, Jacobian atlas, kernel, magnification model,
+        electrode array and simulator. With one nucleus those are also
+        at the top level of `parts`.
     """
     rng = (np.random.default_rng(require(params, 'run.seed'))
            if rng is None else rng)
@@ -343,16 +275,13 @@ def build_simulator(params: dict, atlas_dir=None, synthetic: bool = False,
     voxels_by_hemisphere = _voxel_indices_by_hemisphere(voxel_indices, names)
     targets_by_hemisphere = _targets_by_hemisphere(visual_field_targets,
                                                    names)
-    # One child generator per nucleus, drawn from the caller's, so the
-    # two arrays are independent draws rather than exact reflections of
-    # each other -- and still reproducible from `run.seed`.
+    # One child generator per nucleus, so the two arrays are independent
+    # but reproducible draws.
     generators = ([rng] if len(names) == 1
                   else [np.random.default_rng(int(seed)) for seed
                         in rng.integers(0, 2 ** 62, len(names))])
 
-    # The table-based models are fitted once, on the left nucleus, and
-    # reflected for the right rather than refitted. The per-voxel
-    # 'jacobian' model has nothing to fit and is simply built per side.
+    # Table models are fitted once on the left nucleus and mirrored.
     left_model = (None if require(params, 'magnification.model') == 'jacobian'
                   else build_magnification_model(params, atlas, jacobian))
 
@@ -386,8 +315,7 @@ def build_simulator(params: dict, atlas_dir=None, synthetic: bool = False,
 
     if len(names) == 1:
         only = parts['hemispheres'][names[0]]
-        return simulators[names[0]], {k: v for k, v in only.items()
-                                      if k != 'simulator'}
+        return simulators[names[0]], {**only, **parts}
 
     parts['simulators'] = simulators
     return BilateralLGNSimulator(simulators, params), parts
@@ -424,15 +352,8 @@ def _targets_by_hemisphere(visual_field_targets, names: Sequence[str]) -> dict:
 
 
 # ======================================================================
-# Validation report
+# Validation report against `validation.erwin_1999`
 # ======================================================================
-# Erwin, Baker, Busen & Malpeli (1999)'s own published totals live in
-# `validation.erwin_1999`. Reproducing them from the raw .DAT files
-# confirms the grid layout, the Fortran ordering, the scale factors and
-# the layer-code assignment all at once -- a subtly wrong read produces
-# plausible-looking output everywhere else. They sit in the config with
-# everything else, but note what that means: editing them edits the
-# CHECK, not the model.
 
 
 def atlas_report(atlas, params: Mapping) -> str:
@@ -449,7 +370,8 @@ def atlas_report(atlas, params: Mapping) -> str:
     parvo = np.isin(atlas.layer, resolve_class_codes(params, 'parvo'))
     magno_cells = float(atlas.cells_per_voxel[magno].sum())
     parvo_cells = float(atlas.cells_per_voxel[parvo].sum())
-    tissue = atlas.layer != atlas._missing_layer
+    # Erwin et al.'s totals cover the magno and parvo laminae only.
+    tissue = magno | parvo
     volume = float(tissue.sum()) * atlas._voxel_size_mm ** 3
     density = atlas.cells_per_voxel[tissue]
 
@@ -494,33 +416,21 @@ def atlas_report(atlas, params: Mapping) -> str:
              float(atlas.eccentricity_deg[magno & atlas.valid].max()),
              max_ecc['magno'], ' deg', '{:.1f}'),
         "",
-        "  Accuracy floor on everything downstream: mean "
+        f"  Reconstruction accuracy: mean "
         f"{expected['reconstruction_accuracy_um'][0]} um "
-        f"(SD {expected['reconstruction_accuracy_um'][1]} um) between "
-        "recorded",
-        "  sites and the reconstructed projection column. No choice of "
-        "processing improves on that.",
+        f"(SD {expected['reconstruction_accuracy_um'][1]} um).",
     ]
+    if konio_enabled(params):
+        lines += ['', konio_report(atlas, params)]
     return '\n'.join(lines)
 
 
 def jacobian_report(jacobian_atlas, atlas, params: Mapping) -> str:
-    """Validation summary for a computed or loaded Jacobian atlas.
+    """Fit coverage, fit quality, flags and the magnification field
+    binned by eccentricity.
 
-    Reports fit coverage, fit quality, the two confidence flags, and the
-    magnification/anisotropy field binned by eccentricity. Read the
-    anisotropy column against the Connolly & Van Essen checkpoint -- a
-    checkpoint, not a target.
-
-    `validation.jacobian_report_sample_size` fixes how many voxels are
-    drawn for the magnification statistics. Counts, flag rates and
-    residual statistics are computed exactly over every voxel -- they are
-    cheap array reductions. The per-bin magnification medians are not:
-    they need an SVD per voxel, which over millions of them dominates the
-    runtime of a command whose actual job is already done. A median over
-    a few hundred thousand randomly drawn voxels is stable to far better
-    than the two decimal places printed here, so the report samples and
-    says so rather than quietly taking a minute.
+    Counts and rates are exact; the per-bin magnification medians use a
+    random sample of `validation.jacobian_report_sample_size` voxels.
     """
     ecc_edges = require(params, 'validation.report_eccentricity_edges')
     sample_size = require(params, 'validation.jacobian_report_sample_size')
@@ -530,7 +440,6 @@ def jacobian_report(jacobian_atlas, atlas, params: Mapping) -> str:
     fit_ok = jacobian_atlas.jacobian_valid
     sentinel = atlas.is_ipsi_sentinel() & valid_in
 
-    from dynaphos_lgn.magnification import JacobianMagnification
     rng = np.random.default_rng(seed)
     fit_index = np.flatnonzero(fit_ok.ravel())
     sampled = (rng.choice(fit_index, sample_size, replace=False)
@@ -550,8 +459,7 @@ def jacobian_report(jacobian_atlas, atlas, params: Mapping) -> str:
         "-" * 68,
         f"  valid input voxels                {int(valid_in.sum()):,}",
         f"  of those, ipsi +-135 sentinel     {int(sentinel.sum()):,} "
-        f"({sentinel.sum() / max(valid_in.sum(), 1) * 100:.1f}%) -- excluded "
-        f"as a different part of the visual field, not missing data",
+        f"({sentinel.sum() / max(valid_in.sum(), 1) * 100:.1f}%)",
         f"  voxels with a usable fit          {int(fit_ok.sum()):,} "
         f"({fit_ok.sum() / max(valid_in.sum(), 1) * 100:.1f}% of valid "
         f"input)",
@@ -566,7 +474,7 @@ def jacobian_report(jacobian_atlas, atlas, params: Mapping) -> str:
         f"{(residual > 1).mean() * 100:.4f}%",
         "",
         f"  isotropic-by-construction (central "
-        f"{jacobian_atlas.ISOTROPIC_CONSTRUCTION_RADIUS_DEG:.0f} deg): "
+        f"{isotropic_construction_radius_deg(params):.0f} deg): "
         f"{int(isotropic.sum()):,} "
         f"({isotropic[fit_ok].mean() * 100:.1f}% of fit-ok)",
         f"  unreliable beyond neighbourhood:  {int(unreliable.sum()):,} "
@@ -600,24 +508,8 @@ def jacobian_report(jacobian_atlas, atlas, params: Mapping) -> str:
 
     lines += [
         "",
-        "    sigma1/sigma2 are the two principal magnifications in deg/mm;",
-        "    aniso is their ratio. Connolly & Van Essen report 2-3x near the",
-        "    horizontal meridian (parvocellular layer 6), reversed near the",
-        "    vertical meridian (magnocellular layer 1) -- QUALITATIVE, and a",
-        "    checkpoint rather than a target. Rows inside the central 1 deg",
-        "    are isotropic by construction: Erwin et al. assigned",
-        "    eccentricity there from Malpeli's own isotropic formula, so any",
-        "    anisotropy found there is an artefact of how the atlas was",
-        "    built, not a measurement.",
-        "",
-        "    The 'unreliable' column rising with eccentricity is expected",
-        "    and correct: deg/mm rises toward the periphery, so a fixed",
-        "    physical current-spread radius covers progressively more",
-        "    visual field -- exactly where trusting one point-evaluated",
-        "    Jacobian across a whole footprint is riskiest. It does NOT",
-        "    mark the six-to-four layer transition; a plain linear",
-        "    extrapolation cannot separate a tear from ordinary fast",
-        "    curvature, and this flag does not claim to.",
+        "    sigma1/sigma2: principal magnifications in deg/mm; aniso: their",
+        "    ratio (Connolly & Van Essen report 2-3x).",
     ]
     return '\n'.join(lines)
 
@@ -637,7 +529,7 @@ def cache_jacobian(params: dict, atlas_dir=None, recompute: bool = False,
     jacobian = build_jacobian(params, atlas, directory, recompute)
     elapsed = time.time() - started
 
-    path = directory / require(params, 'atlas.jacobian_cache')
+    path = directory / jacobian_cache_name(params)
     size_mb = path.stat().st_size / 1e6 if path.exists() else float('nan')
 
     report = '\n\n'.join([
@@ -664,16 +556,8 @@ def main(argv=None) -> int:
         epilog=(
             "Typical use, once per checkout:\n"
             "  python -m dynaphos_lgn.build --cache-jacobian\n\n"
-            "Measured on a full-size (240x280x320) rehearsal volume:\n"
-            "  ~90 s wall time, ~4.2 GB peak RSS.\n"
-            "The real atlas compresses less well than that rehearsal did,\n"
-            "so expect JACOBIAN.npz to land near 110 MB.\n\n"
-            "The 4 GB is the part to watch -- it is nearly all full-grid\n"
-            "float32 arrays, so there is no way to trade time for memory\n"
-            "here. Close other things first if RAM is tight.\n\n"
-            "Everything downstream loads the cache instead of recomputing.\n"
-            "One cache covers both nuclei: the right LGN is derived from\n"
-            "this fit by reflection, never refitted."))
+            "Takes ~90 s and ~4.2 GB of RAM and writes a ~110 MB cache.\n"
+            "The right LGN is derived from the same cache."))
     parser.add_argument('--params', default=None,
                         help='params_lgn.yaml (default: config/ beside the '
                              'repo root)')
@@ -689,12 +573,13 @@ def main(argv=None) -> int:
                         help='also write the validation report to this file')
     parser.add_argument('--allow-synthetic', action='store_true',
                         help='fall back to the synthetic atlas if the real '
-                             'files are missing. Off by default: a synthetic '
-                             'cache would look exactly like a real one and '
-                             'be worthless')
+                             'files are missing')
     parser.add_argument('--check-only', action='store_true',
                         help='read the atlas and report on it, without '
                              'computing or writing anything')
+    parser.add_argument('--konio', action='store_true',
+                        help='add konio to cell_classes; '
+                             'caches the K-inclusive Jacobian')
     parser.add_argument('--quiet', action='store_true')
     args = parser.parse_args(argv)
 
@@ -706,7 +591,9 @@ def main(argv=None) -> int:
         Path(__file__).resolve().parents[1] / 'config' / 'params_lgn.yaml')
     if not params_path.exists():
         parser.error(f"No params file at {params_path}; pass --params.")
-    params = load_lgn_params(params_path)
+    params = load_params(str(params_path))
+    if args.konio:
+        params['cell_classes'] = [*params['cell_classes'], 'konio']
 
     if args.check_only:
         directory = Path(args.atlas_dir or require(params,
@@ -733,26 +620,18 @@ def main(argv=None) -> int:
 
     directory = Path(args.atlas_dir or require(params, 'atlas.directory'))
     if not args.quiet:
-        print(f"Building the Jacobian cache from {directory}.\n"
-              f"Expect roughly 90 s and about 4.2 GB of peak RAM at the "
-              f"atlas's full 21.5M voxels;\n"
-              f"the result is written once and loaded thereafter.\n",
-              flush=True)
+        print(f"Building the Jacobian cache from {directory} "
+              f"(~90 s, ~4.2 GB RAM).\n", flush=True)
 
     try:
         result = cache_jacobian(params, args.atlas_dir, args.recompute,
                                 args.report, args.allow_synthetic)
     except FileNotFoundError as error:
-        # A clean message, not a traceback: a missing download is the
-        # single most likely way this command fails, and it is the user's
-        # to fix, not a bug to report.
         print(f"error: {error}")
         return 2
     except MemoryError:
-        print("error: ran out of memory fitting the Jacobian. The fit "
-              "holds several full-grid float32 arrays at once (about "
-              "4.2 GB peak at the atlas's 21.5M voxels) and cannot trade "
-              "time for memory. Close other applications and retry.")
+        print("error: ran out of memory fitting the Jacobian (~4.2 GB "
+              "peak). Close other applications and retry.")
         return 3
     print(result['report'])
     if args.report:

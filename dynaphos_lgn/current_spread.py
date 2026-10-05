@@ -1,12 +1,8 @@
 """Current spread and tissue recruitment for LGN microstimulation.
 
 How far the current reaches (Stoney/Tehovnik, ``R = sqrt(I / K)``) and
-how strongly each nearby voxel is recruited, from one shared kernel so
-the two can never drift apart. The kernel is smooth by necessity: a hard
-in/out cutoff has zero gradient with respect to current, which would
-break end-to-end optimisation at the first step.
-
-``K`` is transplanted from macaque V1 and is unvalidated for LGN.
+how strongly each nearby voxel is recruited, from one shared kernel. The
+kernel is smooth so that recruitment stays differentiable in the current.
 """
 from __future__ import annotations
 
@@ -27,7 +23,7 @@ def _logit(p: float) -> float:
 
 
 def excitability_constant_ua_per_mm2(params: Mapping) -> float:
-    """K in uA/mm^2 -- transplanted from macaque V1, unvalidated for LGN."""
+    """K in uA/mm^2."""
     return float(require(params, 'current_spread.k_ua_per_mm2'))
 
 
@@ -39,11 +35,7 @@ def lgn_threshold_ua(params: Mapping) -> Tuple[float, float]:
 
 def stoney_radius_mm(current_ua: Tensorish,
                      k_ua_per_mm2: float) -> Tensorish:
-    """Activated-tissue **radius** R = sqrt(I/K), in mm.
-
-    Half the literature's diameter. Conflating the two is a 2x size
-    error, hence the unambiguous name.
-    """
+    """Activated-tissue radius R = sqrt(I/K), in mm (not the diameter)."""
     if isinstance(current_ua, torch.Tensor):
         return torch.sqrt(torch.clamp(current_ua, min=0.0) / k_ua_per_mm2)
     return np.sqrt(np.clip(np.asarray(current_ua, float), 0, None)
@@ -53,11 +45,7 @@ def stoney_radius_mm(current_ua: Tensorish,
 def bosking_diameter_mm(current_ua: Tensorish, max_diameter_mm: float,
                         slope_per_ua: float,
                         i_half_ua: float) -> Tensorish:
-    """Saturating alternative to Stoney's square root.
-
-    Bosking et al. (2017)'s functional shape only; the configured slope
-    and half-current are Dynaphos's V1 values, not Bosking's.
-    """
+    """Saturating alternative to Stoney's square root (Bosking et al. 2017)."""
     if isinstance(current_ua, torch.Tensor):
         return max_diameter_mm * torch.sigmoid(
             slope_per_ua * (current_ua - i_half_ua))
@@ -66,12 +54,10 @@ def bosking_diameter_mm(current_ua: Tensorish, max_diameter_mm: float,
 
 
 def k_for_cell_class(cell_class: str, params: Mapping) -> float:
-    """Optionally scale K by cell-class soma size.
+    """K, optionally scaled by cell-class soma size.
 
-    `current_spread.class_scaling` picks between 'none' (the default),
-    'diameter' (K ~ 1/d) and 'diameter_squared' (K ~ 1/d^2). No
-    measurement supports any particular exponent, which is why all three
-    stay explicit.
+    `current_spread.class_scaling` is 'none', 'diameter' (K ~ 1/d) or
+    'diameter_squared' (K ~ 1/d^2).
     """
     k_reference = excitability_constant_ua_per_mm2(params)
     reference_class = require(params,
@@ -98,19 +84,15 @@ def k_for_cell_class(cell_class: str, params: Mapping) -> float:
 class RecruitmentKernel:
     """Smooth, differentiable tissue-recruitment weight w(distance, I).
 
-    The kernel is anchored so that its weight equals `contour_value` at
-    exactly the Stoney radius R(I). That anchoring is what keeps
-    "the radius the size model uses" and "the radius the per-layer
-    recruitment uses" the same number rather than two independently
-    tuned ones.
+    The weight equals `contour_value` at exactly the spread radius R(I),
+    so phosphene size and per-layer recruitment use the same radius.
 
     :ivar shape: 'gaussian' or 'logistic'.
-    :ivar contour_value: Weight at r = R(I). 1/e^2 by default, which
-        makes `radius_to_sigma` equal V1 Dynaphos's shipped 0.5.
+    :ivar contour_value: Weight at r = R(I). 1/e^2 makes `radius_to_sigma`
+        equal V1 Dynaphos's 0.5.
     :ivar logistic_softness: Transition width of the logistic kernel, as
-        a fraction of R(I). Smaller is closer to a hard cutoff, and so
-        closer to a vanishing gradient.
-    :ivar k: Excitability constant, given in uA/mm^2.
+        a fraction of R(I).
+    :ivar k: Excitability constant, uA/mm^2.
     :ivar spread_model: 'stoney' (sqrt) or 'bosking' (sigmoid).
     """
 
@@ -125,11 +107,8 @@ class RecruitmentKernel:
 
     @classmethod
     def from_params(cls, params: Mapping) -> 'RecruitmentKernel':
-        """Build the kernel the config describes.
-
-        When `electrodes.cell_class` names a class, K goes through
-        `k_for_cell_class`, so the configured class scaling applies.
-        """
+        """The kernel the config describes, with K scaled for
+        `electrodes.cell_class` when one is set."""
         cell_class = require(params, 'electrodes.cell_class')
         bosking = require(params, 'current_spread.bosking')
         return cls(
@@ -192,18 +171,16 @@ class RecruitmentKernel:
             sigma = torch.clamp(radius * self.radius_to_sigma, min=eps)
             return torch.exp(-0.5 * (distance_mm / sigma) ** 2)
         softness = torch.clamp(radius * self.logistic_softness, min=eps)
-        # Anchored so w(R) == contour_value exactly: at d = R the
-        # argument reduces to logit(contour_value).
+        # At d = R the argument reduces to logit(contour_value).
         offset = self._logistic_offset
         return torch.sigmoid(-(distance_mm - radius) / softness + offset)
 
     def effective_radius_mm(self, current_ua: Tensorish,
                             tail_weight: float = 1e-3) -> Tensorish:
-        """Radius beyond which the kernel's weight drops under
-        `tail_weight`.
+        """Radius beyond which the weight drops under `tail_weight`.
 
-        Setup code sizing a candidate neighbourhood must use this, not
-        `radius_mm`, or it clips the smooth kernel's tail.
+        Use this, not `radius_mm`, to size a candidate neighbourhood, or
+        the kernel's tail gets clipped.
         """
         if self.shape == 'gaussian':
             factor = math.sqrt(-2.0 * math.log(tail_weight)) \
@@ -216,40 +193,16 @@ class RecruitmentKernel:
         return self.radius_mm(current_ua) * factor
 
 
-def aggregate_activation(per_electrode_weights: torch.Tensor,
-                         mode: str = 'independent') -> torch.Tensor:
-    """Combine simultaneously-active electrodes' recruitment weights.
-
-    :param per_electrode_weights: (..., n_electrodes, n_voxels) weights.
-    :param mode: 'independent' (default, linear summation),
-        'field_superposition' (same sum, documented as additive fields)
-        or 'probability_summation' (``1 - prod(1 - w)``).
-
-    There is no LGN multi-electrode data: the modes bracket a real
-    disagreement in the non-LGN literature rather than approximating one
-    known answer, so report across modes, not from one.
-    """
-    if mode in ('independent', 'field_superposition'):
-        return per_electrode_weights.sum(dim=-2)
-    if mode == 'probability_summation':
-        return 1.0 - torch.prod(1.0 - per_electrode_weights.clamp(0, 1),
-                                dim=-2)
-    raise ValueError(f"Unknown aggregation mode {mode!r}.")
-
-
 def threshold_reduction_bracket(n_electrodes: int, spacing_mm: float,
                                 params: Mapping) -> dict:
-    """Bracket the expected multi-electrode threshold reduction.
+    """Bound the multi-electrode threshold reduction under field summation.
 
-    The two mechanistic extremes from the non-LGN literature, plus the
-    geometric quantity that decides which should dominate: electrode
-    spacing relative to the current-spread radius. This is a bracket,
-    not a prediction.
+    The size of the effect depends on electrode spacing relative to the
+    spread radius. Floor from Callier et al. (2015), ceiling from Kunigk
+    et al. (2022).
 
     :return: dict with ``spread_radius_mm``, ``spacing_over_radius``,
-        ``floor_fraction`` (Callier-style probability summation),
-        ``ceiling_fraction`` (Kunigk-style field summation),
-        ``regime`` and ``note``.
+        ``floor_fraction``, ``ceiling_fraction`` and ``regime``.
     """
     current_ua = lgn_threshold_ua(params)[0]
     k_ua_per_mm2 = excitability_constant_ua_per_mm2(params)
@@ -258,27 +211,23 @@ def threshold_reduction_bracket(n_electrodes: int, spacing_mm: float,
     radius = float(stoney_radius_mm(current_ua, k_ua_per_mm2))
     ratio = spacing_mm / radius if radius > 0 else float('inf')
 
+    # log2 ramp from 0 at one electrode to 1 at saturates_at_n_electrodes
     saturates_at = max(float(cfg['saturates_at_n_electrodes']), 1.0)
-
-    # log2-scaled ramp from 0 (at 1 electrode) to 1 (at n_electrodes >= saturates_at)
     saturation_fraction = min(1.0, math.log2(max(n_electrodes, 1))
                               / max(math.log2(saturates_at), 1e-9))
 
-    # Kim & Callier 2015: spacing-independent and small;
-    floor = cfg['probability_summation_max_reduction'] * saturation_fraction
-    # Kunigk 2022: large, and vanishing once the electrodes' fields stop overlapping.
+    floor = cfg['low_overlap_max_reduction'] * saturation_fraction
     vanish = float(cfg['field_summation_vanishes_at_radii'])
     overlap = max(0.0, 1.0 - ratio / vanish)
     ceiling = (cfg['field_summation_max_reduction'] * saturation_fraction
-              * overlap)
+               * overlap)
 
     if ratio <= 1.0:
-        regime = 'field-summation dominated (spacing <= spread radius)'
+        regime = 'high overlap (spacing <= spread radius)'
     elif ratio <= vanish:
-        regime = 'mixed'
+        regime = 'partial overlap'
     else:
-        regime = (f'probability-summation dominated '
-                  f'(spacing > {vanish:g}x radius)')
+        regime = f'low overlap (spacing > {vanish:g}x radius)'
 
     return {
         'n_electrodes': n_electrodes,
@@ -288,7 +237,4 @@ def threshold_reduction_bracket(n_electrodes: int, spacing_mm: float,
         'floor_fraction': floor,
         'ceiling_fraction': max(floor, ceiling),
         'regime': regime,
-        'note': ('Bracket, not a prediction: no LGN multi-electrode '
-                 'threshold data exists. Floor from Callier et al. (2015), '
-                 'ceiling from Kunigk et al. (2022), both non-LGN.'),
     }

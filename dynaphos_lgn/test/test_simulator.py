@@ -41,18 +41,8 @@ class TestForwardPass:
             assert state[key] is not None, key
 
     def test_repeated_stimulation_rises_then_habituates(self, built):
-        """Under constant stimulation the percept first BUILDS (the
-        leaky integrator charging up over the first few frames) and only
-        then fades, as the memory trace raises the leak current.
-
-        Comparing frame 1 against frame 40 would therefore get the sign
-        of the effect wrong -- frame 1 is on the rising edge, not at the
-        peak. The real signature is a peak a handful of frames in,
-        followed by a sustained decline. Inherited unchanged from the V1
-        model; there is no LGN evidence either way about duty-cycle
-        response, or about whether a single exponential decay is
-        adequate given relay cells' burst/tonic switching.
-        """
+        """Under constant stimulation the percept first builds, peaks a few
+        frames in, and then fades."""
         sim, _ = built
         sim.reset()
         trace = [float(sim(_amp(sim, 90e-6)).sum()) for _ in range(300)]
@@ -137,6 +127,71 @@ class TestPhysics:
             sim.num_phosphenes
 
 
+class TestBatching:
+    """`run.batch_size` stacks independent stimuli along a leading
+    dimension. Each row must render exactly what an unbatched call with
+    that row's amplitudes would -- through both render paths."""
+
+    AMPLITUDES_A = (30e-6, 60e-6, 90e-6)
+
+    @pytest.fixture
+    def batched(self, built, params_override):
+        from dynaphos_lgn.simulator import LGNPhospheneSimulator
+        _, array = built
+        params = params_override(run__batch_size=len(self.AMPLITUDES_A))
+        return LGNPhospheneSimulator(params, array,
+                                     rng=np.random.default_rng(0))
+
+    def _batched_amp(self, sim):
+        return torch.tensor(self.AMPLITUDES_A)[:, None].expand(
+            -1, sim.num_phosphenes).contiguous()
+
+    def test_both_render_paths_are_exercised(self, batched):
+        assert len(batched.ellipse_index) and len(batched.scatter_index)
+
+    def test_output_shape(self, batched):
+        img = batched(self._batched_amp(batched))
+        res_x, res_y = batched.params['run']['resolution']
+        assert img.shape == (len(self.AMPLITUDES_A), res_y, res_x)
+
+    def test_rows_match_unbatched_calls(self, built, batched):
+        sim, _ = built
+        batched.update(self._batched_amp(batched))
+        maps = batched.spatial_activation()
+        for row, value in enumerate(self.AMPLITUDES_A):
+            sim.reset()
+            sim.update(_amp(sim, value))
+            torch.testing.assert_close(maps[row], sim.spatial_activation(),
+                                       atol=1e-5, rtol=1e-5)
+
+    def test_gradient_reaches_every_row(self, batched):
+        amp = self._batched_amp(batched).requires_grad_(True)
+        batched.update(amp)
+        batched.spatial_activation().sum().backward()
+        assert torch.all(amp.grad.abs().sum(dim=1) > 0)
+
+
+class TestSafetyLimit:
+    def test_is_read_from_the_config(self, built):
+        sim, _ = built
+        assert sim.safety_limit_ua == \
+            sim.params['default_stim']['safety_limit_ua']
+
+    @pytest.mark.parametrize('limit_ua', [0.0, 1e6])
+    def test_must_lie_within_the_precomputed_range(self, built,
+                                                   params_override,
+                                                   limit_ua):
+        """Above electrodes.max_current_ua the candidate neighbourhoods
+        are too small, so the limit would permit currents the array
+        cannot model."""
+        from dynaphos_lgn.params import ParameterError
+        from dynaphos_lgn.simulator import LGNPhospheneSimulator
+        _, array = built
+        params = params_override(default_stim__safety_limit_ua=limit_ua)
+        with pytest.raises(ParameterError, match='safety_limit_ua'):
+            LGNPhospheneSimulator(params, array)
+
+
 class TestGradients:
     def test_gradient_reaches_amplitude(self, built):
         sim, _ = built
@@ -156,6 +211,24 @@ class TestGradients:
         sim(_amp(sim, 70e-6), pulse_width=pw, frequency=freq).sum().backward()
         assert float(pw.grad.abs().sum()) > 0
         assert float(freq.grad.abs().sum()) > 0
+
+    @pytest.mark.skipif(not torch.cuda.is_available(),
+                        reason="Needs CUDA.")
+    def test_cpu_inputs_reach_a_gpu_simulator(self, built, params_override):
+        """CPU stimulation drives a GPU simulator, and the gradient comes
+        back to the CPU inputs."""
+        from dynaphos_lgn.simulator import LGNPhospheneSimulator
+        _, array = built
+        sim = LGNPhospheneSimulator(params_override(run__gpu=0), array,
+                                    rng=np.random.default_rng(0))
+        sim.soft_threshold = True
+        amp = _amp(sim, 70e-6, requires_grad=True)
+        pw = torch.full((sim.num_phosphenes,), 170e-6, requires_grad=True)
+        img = sim(amp, pulse_width=pw, frequency=300.0)
+        assert img.device.type == 'cuda'
+        img.sum().backward()
+        assert float(amp.grad.abs().sum()) > 0
+        assert float(pw.grad.abs().sum()) > 0
 
     def test_hard_threshold_blocks_subthreshold_gradients(self, built):
         """Documented consequence, not a bug: a step function has zero
@@ -195,14 +268,7 @@ class TestGradients:
         assert soft > hard
 
     def test_soft_threshold_renders_nothing_at_zero_amplitude(self, built):
-        """A silent electrode must render nothing, soft gate or not.
-
-        The raw logistic does not satisfy this: the threshold sits only
-        `mu/sd = 1.36` slope-widths above zero activation, so a silent
-        electrode gets p(detect) ~ 0.2 and the array glows. The
-        baseline correction is what buys the invariant back -- see
-        `thresholding.soft_threshold_baseline`.
-        """
+        """A silent electrode must render nothing, soft gate or not."""
         sim, _ = built
         assert sim.soft_threshold, (
             "this test is about the SOFT gate; the config default "

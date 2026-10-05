@@ -1,23 +1,16 @@
 """Turning recruited tissue into a rendered percept.
 
-Two renderers, chosen per electrode rather than globally:
+Two renderers, chosen per electrode:
 
 `EllipseGaussianRenderer`
-    Evaluate the local Jacobian once at the electrode centre and stretch
-    the whole blob by that single linear map. One closed-form elliptical
-    Gaussian per electrode -- cheap, smooth, differentiable, and it
-    subsumes the isotropic case rather than being a separate path.
-
+    One elliptical Gaussian per electrode, shaped by the local
+    magnification at its centre.
 `ScatterRenderer`
-    Let every recruited voxel's own atlas position, weighted by its
-    recruitment, be the phosphene. Assumes no ellipse, so nothing has to
-    hold across the patch. The splat kernel that makes the cloud
-    continuous is a rendering technicality, sized from resolution and
-    point spacing and never from a magnification factor.
+    Every recruited voxel splatted at its own atlas position, weighted
+    by its recruitment.
 
-Both return activation maps normalised to a peak of 1, the convention
-the Dynaphos state machinery expects: amplitude lives in `brightness`,
-shape lives here.
+Both return activation maps with a peak of 1; brightness is applied by
+the simulator.
 """
 from __future__ import annotations
 
@@ -96,14 +89,11 @@ def _gaussian_kernel1d(sigma_px: torch.Tensor, radius: int) -> torch.Tensor:
 
 
 class ScatterRenderer:
-    """Per-voxel scatter rendering with a small, fixed splat kernel.
+    """Per-voxel scatter rendering with a small splat kernel.
 
-    Point positions are fixed at setup and only the weights move, so
-    which pixels each point touches is precomputed as bilinear splat
-    weights and the forward pass is a scatter-add plus a separable
-    Gaussian blur -- O(points + pixels * kernel) rather than the
-    O(points * pixels) a dense distance matrix would cost. Each
-    electrode renders into its own patch, not the whole frame.
+    Point positions are fixed, so their bilinear splat weights are
+    precomputed; the forward pass is a scatter-add into a per-electrode
+    patch followed by a separable Gaussian blur.
 
     :param points_xy: (n_electrodes, n_points, 2) point positions, deg.
     :param centers_xy: (n_electrodes, 2) patch centres, deg.
@@ -111,16 +101,17 @@ class ScatterRenderer:
     :param patch_radius_deg: (n_electrodes,) half-width of each patch.
     :param bandwidth_floor_deg: (n_electrodes,) lower clamp on the splat
         kernel, from the point cloud's own spacing.
-    :param bandwidth_ceiling_deg: (n_electrodes,) upper clamp, so the
-        kernel can never approach the cloud's overall extent even in a
-        degenerate case such as a single dominant voxel.
+    :param bandwidth_ceiling_deg: (n_electrodes,) upper clamp.
+    :param extra_blur_deg: Largest blur added on top of the clamped
+        bandwidth, e.g. a receptive field; widens the kernel cap.
     """
 
     def __init__(self, points_xy: np.ndarray, centers_xy: np.ndarray,
                  params: Mapping, patch_radius_deg: np.ndarray,
                  bandwidth_floor_deg: np.ndarray,
                  bandwidth_ceiling_deg: np.ndarray,
-                 data_kwargs: Optional[dict] = None):
+                 data_kwargs: Optional[dict] = None,
+                 extra_blur_deg: float = 0.0):
         data_kwargs = data_kwargs or {}
         self.params = params
         device = data_kwargs.get('device', None)
@@ -207,8 +198,9 @@ class ScatterRenderer:
                                                dtype=dtype)
         self.bandwidth_ceiling = torch.as_tensor(ceiling, device=device,
                                                  dtype=dtype)
-        self.max_kernel_radius_px = require(params,
-                                            'rendering.max_kernel_radius_px')
+        self.max_kernel_radius_px = (
+            require(params, 'rendering.max_kernel_radius_px')
+            + math.ceil(3 * extra_blur_deg / px_deg))
         self._smooth_clamp_softness = require(
             params, 'rendering.smooth_clamp_softness_fraction')
         self._dtype, self._device = dtype, device
@@ -219,18 +211,10 @@ class ScatterRenderer:
                       adaptive: bool = True) -> torch.Tensor:
         """Splat bandwidth per electrode, degrees.
 
-        With ``adaptive=False`` this is just the precomputed floor (the
-        point cloud's own median nearest-neighbour spacing), which costs
-        nothing at runtime.
-
-        With ``adaptive=True`` it is recomputed from the live
-        recruitment weights by a Scott/Silverman-style rule,
-        ``h = s * n_eff ** (-1/6)``, with ``s`` the weighted spread about
-        the weighted centroid and ``n_eff`` Kish's effective sample size.
-        That matters at low amplitude, where only a tight cluster of
-        voxels is active and a neighbourhood-sized bandwidth would
-        over-smooth it. The clamps are a smooth blend, not a hard
-        min/max, so no gradient is zeroed.
+        The precomputed floor, or with ``adaptive=True`` a Scott-style
+        ``h = s * n_eff ** (-1/6)`` from the live weights (weighted
+        spread `s`, Kish effective sample size `n_eff`), smoothly clamped
+        between floor and ceiling.
         """
         floor = self.bandwidth_floor
         if not adaptive:
@@ -253,43 +237,52 @@ class ScatterRenderer:
                bandwidth_deg: torch.Tensor) -> torch.Tensor:
         """Rendered activation maps, peak 1.
 
-        :param weights: (n_electrodes, n_points) recruitment weights.
-        :param bandwidth_deg: (n_electrodes,) splat bandwidth.
-        :return: (n_electrodes, res_y, res_x)
+        :param weights: (..., n_electrodes, n_points) recruitment weights.
+        :param bandwidth_deg: (..., n_electrodes) splat bandwidth, or
+            (n_electrodes,) shared across the leading dimensions.
+        :return: (..., n_electrodes, res_y, res_x)
         """
         n = self.n_electrodes
-        w = torch.clamp(weights, min=0)
+        lead = weights.shape[:-2]
+        w = torch.clamp(weights, min=0).reshape(-1, n, self.n_points)
+        batch = w.shape[0]
         # Each point contributes to the four pixels it falls between,
         # and `splat_weight` is point-major (p occupies slots 4p..4p+3),
         # so repeating each weight four times lines the two up.
         contrib = w.repeat_interleave(4, dim=-1) * self.splat_weight
 
-        patch = torch.zeros(n, self.patch_size * self.patch_size,
+        patch = torch.zeros(batch, n, self.patch_size * self.patch_size,
                             device=w.device, dtype=w.dtype)
-        patch = patch.scatter_add(1, self.splat_index, contrib)
-        patch = patch.reshape(1, n, self.patch_size, self.patch_size)
+        patch = patch.scatter_add(
+            2, self.splat_index.expand(batch, -1, -1), contrib)
+        # Every (row, electrode) pair is its own channel, so one grouped
+        # convolution blurs them all with their own kernels.
+        patch = patch.reshape(1, batch * n, self.patch_size, self.patch_size)
 
-        sigma_px = bandwidth_deg / min(self.deg_per_px_x, self.deg_per_px_y)
+        sigma_px = (bandwidth_deg.expand(*lead, n).reshape(-1)
+                    / min(self.deg_per_px_x, self.deg_per_px_y))
         radius = int(min(self.max_kernel_radius_px,
                          max(1, math.ceil(3.0 * float(
                              sigma_px.detach().max())))))
         kernel = _gaussian_kernel1d(sigma_px, radius)
-        kx = kernel.reshape(n, 1, 1, -1)
-        ky = kernel.reshape(n, 1, -1, 1)
+        kx = kernel.reshape(batch * n, 1, 1, -1)
+        ky = kernel.reshape(batch * n, 1, -1, 1)
         patch = F.conv2d(F.pad(patch, (radius, radius, 0, 0),
-                               mode='constant'), kx, groups=n)
+                               mode='constant'), kx, groups=batch * n)
         patch = F.conv2d(F.pad(patch, (0, 0, radius, radius),
-                               mode='constant'), ky, groups=n)
+                               mode='constant'), ky, groups=batch * n)
 
-        patch = patch.reshape(n, -1)
-        peak = patch.amax(dim=1, keepdim=True)
+        patch = patch.reshape(batch, n, -1)
+        peak = patch.amax(dim=-1, keepdim=True)
         patch = patch / (peak + 1e-12)
         patch = patch * self.image_mask
 
         res_y, res_x = self.resolution
-        image = torch.zeros(n, res_y * res_x, device=w.device, dtype=w.dtype)
-        image = image.scatter_add(1, self.image_index, patch)
-        return image.reshape(n, res_y, res_x)
+        image = torch.zeros(batch, n, res_y * res_x,
+                            device=w.device, dtype=w.dtype)
+        image = image.scatter_add(
+            2, self.image_index.expand(batch, -1, -1), patch)
+        return image.reshape(*lead, n, res_y, res_x)
 
 
 def _smooth_max(a: torch.Tensor, b: torch.Tensor,
@@ -305,13 +298,8 @@ def _smooth_min(a: torch.Tensor, b: torch.Tensor,
 def _smooth_clamp(x: torch.Tensor, low: torch.Tensor,
                   high: torch.Tensor, softness_fraction: float = 0.05
                   ) -> torch.Tensor:
-    """Differentiable stand-in for ``clamp(x, low, high)``.
-
-    A hard clamp zeroes the gradient outside the interval. The
-    smooth-min/max pair ``0.5 * (a + b +- sqrt((a - b)^2 + k^2))`` is
-    indistinguishable from the identity well inside it and still passes
-    a small gradient through a saturated value.
-    """
+    """Differentiable ``clamp(x, low, high)`` that still passes a small
+    gradient through saturated values."""
     span = torch.clamp(high - low, min=1e-9)
     softness = softness_fraction * span
     return _smooth_min(_smooth_max(x, low, softness), high, softness)

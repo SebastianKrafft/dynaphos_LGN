@@ -15,7 +15,7 @@ class TestBuild:
             synthetic_atlas__shape_ml_dv_ap=(32, 32, 48))
         atlas = build_atlas(params)
         assert getattr(atlas, 'is_synthetic', False)
-        assert any('SYNTHETIC' in r.message for r in caplog.records)
+        assert any('synthetic' in r.message for r in caplog.records)
 
     def test_kernel_reflects_the_configured_constants(self, lgn_params):
         kernel = build_kernel(lgn_params)
@@ -46,16 +46,7 @@ class TestBuild:
     def test_non_jacobian_model_actually_sizes_the_electrodes(
             self, params_override, choice):
         """A non-'jacobian' `magnification.model` must drive sizing, not
-        just get built and discarded.
-
-        `build_electrode_array` used to hand the raw per-voxel Jacobian
-        atlas to every array regardless of `magnification.model`, and
-        `LGNElectrodeArray._resolve_magnification` treats that Jacobian
-        as authoritative whenever it is given -- so the configured model
-        only ever filled its gaps. Every electrode is flagged
-        `scalar_magnification` exactly when the chosen model, not the
-        per-voxel Jacobian, sized it.
-        """
+        just get built and discarded."""
         params = params_override(magnification__model=choice,
                                  electrodes__n_electrodes=6,
                                  synthetic_atlas__shape_ml_dv_ap=(32, 32, 64))

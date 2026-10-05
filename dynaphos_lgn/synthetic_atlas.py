@@ -1,19 +1,8 @@
-"""A small, analytic stand-in for the Erwin et al. (1999) atlas.
+"""A small, closed-form stand-in for the Erwin et al. (1999) atlas.
 
-The real atlas is 21.5M voxels of separately-downloaded binary data, so
-this builds a much smaller volume with the SAME INTERFACE -- attribute
-names, sentinels, layer codes, index/mm convention -- from a closed-form
-retinotopic map, for tests and a first look at the pipeline.
-
-**It is not a model of the LGN and must never be used for results.** Its
-retinotopy is a clean exponential by construction: no tears, no
-ipsilateral sentinel sparsity, no reconstruction noise, no central-1 deg
-isotropy artefact. Anything it validates is code correctness, not
-biology. Every instance carries ``is_synthetic = True``.
-
-It does reproduce laminar structure, a foveally-magnified eccentricity
-map, genuine local anisotropy, and out-of-nucleus placeholder voxels --
-enough to exercise every code path.
+Same interface as `ErwinAtlas` (attributes, sentinels, layer codes), so
+tests and demos run without the real data. Not a model of the LGN: use
+it to exercise code, not for results.
 """
 from __future__ import annotations
 
@@ -26,24 +15,13 @@ from dynaphos_lgn.params import require
 
 
 class SyntheticAtlas(ErwinAtlas):
-    """An `ErwinAtlas` filled from a closed-form map instead of a file.
+    """An `ErwinAtlas` filled from a closed-form map, configured by the
+    `synthetic_atlas` block.
 
-    Every knob lives in the config's `synthetic_atlas` block:
-
-    - ``shape_ml_dv_ap``: (ML, DV, AP) voxel counts. The shipped values
-      give roughly 2.4 x 1.6 x 5.0 mm, sized so the magnification lands
-      in the real atlas's order of magnitude -- a smaller volume crams
-      the whole eccentricity range into a millimetre and renders
-      phosphenes tens of degrees across.
-    - ``max_eccentricity_deg``: Eccentricity at the anterior end.
-    - ``eccentricity_scale_deg``: E0 in
-      ``E(s) = E0 * (exp(s / lambda) - 1)``, the eccentricity at which
-      the map switches from roughly linear to roughly exponential.
-      Smaller values concentrate more tissue on the fovea.
-    - ``n_layers``: How many laminae to stack along DV. Codes cycle
-      through the real LAYERS.DAT values 1-4.
-    - ``inclination_span_deg``: Inclination range mapped across ML.
-    - ``seed``: Reproducibility for the cell-count jitter.
+    Eccentricity grows exponentially along AP,
+    ``E(s) = E0 * (exp(s / lambda) - 1)``; inclination is linear across
+    ML; `n_layers` laminae are stacked along DV with codes cycling
+    through 1-4.
     """
 
     is_synthetic = True
@@ -85,10 +63,7 @@ class SyntheticAtlas(ErwinAtlas):
         layer = np.broadcast_to(layer, self.atlas_shape).astype(np.int8)
 
         # --- eccentricity: exponential along AP ------------------------
-        # E(s) = E0 * (exp(s / lam) - 1), so dE/ds = (E + E0)/lam, i.e.
-        # linear magnification M(E) = lam / (E + E0) -- the same
-        # functional shape as the monopole cortical model, which is what
-        # gives a realistically steep foveal magnification.
+        # dE/ds = (E + E0)/lam, i.e. magnification M(E) = lam / (E + E0)
         span_vox = max(n_ap - 2 * m - 1, 1)
         s = (ap - m) / span_vox                       # 0..1 along AP
         lam = 1.0 / np.log1p(self.max_eccentricity_deg
@@ -104,11 +79,13 @@ class SyntheticAtlas(ErwinAtlas):
         incl_deg = np.broadcast_to(incl_deg, self.atlas_shape)
         valid = np.broadcast_to(inside & ~in_gap, self.atlas_shape)
 
+        # The gaps carry retinotopy but no layer, like the real atlas's
+        # interlaminar zones.
         self.eccentricity = np.where(
-            valid, np.round(ecc_deg * self._ecc_scale),
+            inside, np.round(ecc_deg * self._ecc_scale),
             self._missing_ecc_incl).astype(np.int16)
         self.inclination = np.where(
-            valid, np.round(incl_deg),
+            inside, np.round(incl_deg * self._incl_scale),
             self._missing_ecc_incl).astype(np.int16)
         self.layer = layer
 
@@ -119,23 +96,16 @@ class SyntheticAtlas(ErwinAtlas):
         cells = np.where(valid, np.clip(density * jitter, 0, None), 0.0)
         self.cells = np.round(cells * self._cells_scale).astype(np.int16)
 
-        self.valid = ((self.eccentricity != self._missing_ecc_incl)
-                      & (self.inclination != self._missing_ecc_incl)
-                      & (self.layer != self._missing_layer))
+        self.update_valid()
         self.eccentricity_deg = self.eccentricity / self._ecc_scale
-        self.inclination_deg = self.inclination.astype(float)
+        self.inclination_deg = self.inclination / self._incl_scale
         self.cells_per_voxel = self.cells / self._cells_scale
 
     # ------------------------------------------------------------------
     def analytic_magnification_deg_per_mm(self, eccentricity_deg
                                           ) -> Tuple[np.ndarray, np.ndarray]:
-        """The map's true (AP, ML) magnifications, for checking the fit.
-
-        Because the synthetic map is closed-form, the Jacobian machinery
-        can be validated against the exact answer instead of against
-        another estimate. Returns (along-eccentricity, along-inclination)
-        magnification in deg/mm.
-        """
+        """The map's exact (along-eccentricity, along-inclination)
+        magnifications in deg/mm, for checking the Jacobian fit."""
         e = np.asarray(eccentricity_deg, dtype=float)
         n_ml, _, n_ap = self.atlas_shape
         m = self.margin_vox

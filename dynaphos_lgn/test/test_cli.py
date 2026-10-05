@@ -1,11 +1,4 @@
-"""The `python -m dynaphos_lgn.build` entry point.
-
-The Jacobian cache is the one build step that is expensive enough that
-nobody will run it twice to find out it was misconfigured, so its
-command line gets tested like a deliverable: exit codes, refusal to
-fabricate, and the read-back checks that would catch a wrongly-parsed
-atlas.
-"""
+"""The `python -m dynaphos_lgn.build` entry point."""
 import numpy as np
 import pytest
 
@@ -134,13 +127,7 @@ class TestEndToEnd:
     def test_second_run_loads_instead_of_recomputing(self, fake_atlas_dir,
                                                      full_scale_params):
         """The cache is the whole point -- a second run must not redo the
-        fit.
-
-        Timed on the fit specifically rather than on the whole command:
-        reading 172 MB of .DAT files and building the report cost real
-        seconds either way, and folding those into the assertion would
-        make it a flaky measure of the wrong thing.
-        """
+        fit."""
         result = build.cache_jacobian(full_scale_params, fake_atlas_dir)
         assert result['fit_seconds'] < 20
 
@@ -158,9 +145,7 @@ class TestReports:
                                      lgn_params)
         assert 'sigma1' in text and 'aniso' in text
         assert 'unreliable' in text
-        # The caveat must travel with the number it qualifies.
-        assert 'isotropic by construction' in text
-        assert 'QUALITATIVE' in text
+        assert 'isotropic-by-construction' in text
 
     def test_sampled_medians_match_the_exact_ones(self, synthetic_atlas,
                                                    synthetic_jacobian,

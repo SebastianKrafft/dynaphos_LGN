@@ -1,27 +1,19 @@
 """End-to-end demonstration of the LGN phosphene simulator.
 
-Runs the whole pipeline and writes four figures:
+Writes three figures:
 
-1. ``lgn_demo_electrodes.png`` -- where the electrodes sit in the visual
-   field, coloured by which renderer each one uses and by eccentricity.
-2. ``lgn_demo_percept.png`` -- a rendered percept, plus the per-lamina
+1. ``lgn_demo_electrodes.png`` -- electrode positions in the visual
+   field, by renderer and eccentricity, and phosphene sizes.
+2. ``lgn_demo_percept.png`` -- a rendered percept and the per-lamina
    recruitment behind it.
 3. ``lgn_demo_optimisation.png`` -- gradient descent on per-electrode
-   amplitude towards a target percept, which is the "end-to-end
-   optimisable" claim actually exercised.
-4. ``lgn_demo_uncertainty.png`` -- the same phosphene rendered under the
-   low, transplanted and high values of the excitability constant K, so
-   the size uncertainty is visible rather than buried in a footnote.
+   amplitude towards a target percept.
 
 Usage::
 
     python examples/demo_simulator_lgn.py                 # real atlas if present
     python examples/demo_simulator_lgn.py --synthetic     # force the stand-in
     python examples/demo_simulator_lgn.py --atlas-dir DIR
-
-Without the real Erwin atlas the demo falls back to the synthetic atlas
-and says so on every figure. That path exercises the code; it is not a
-result.
 """
 from __future__ import annotations
 
@@ -119,13 +111,8 @@ def plot_percept(sim, out_path: Path):
 
 
 def run_optimisation(sim, out_path: Path, steps: int = 120):
-    """Gradient descent on per-electrode amplitude towards a target.
-
-    The soft threshold is switched on for this, and that is a modelling
-    choice worth stating rather than a solver trick: with the hard
-    threshold Dynaphos inherits, an electrode below threshold has
-    exactly zero gradient and can never learn to cross it.
-    """
+    """Gradient descent on per-electrode amplitude towards a target,
+    with the soft threshold so sub-threshold electrodes get a gradient."""
     sim.soft_threshold = True
 
     sim.reset()
@@ -193,9 +180,7 @@ def main():
     params = load_params(args.params)
     params['electrodes']['n_electrodes'] = args.n_electrodes
     params['run']['gpu'] = None
-    # Keep the electrodes inside the rendered field of view, so the demo
-    # figures show every phosphene rather than silently cropping most of
-    # the array. The simulator warns when they do not.
+    # Keep the electrodes inside the rendered field of view
     half = require(params, 'run.view_angle') / 2
     params['electrodes']['max_eccentricity_deg'] = min(
         params['electrodes'].get('max_eccentricity_deg', half), 0.8 * half)
@@ -209,7 +194,7 @@ def main():
     # Only for reporting
     spacing = 0.4
     bracket = threshold_reduction_bracket(4, spacing, params)
-    print(f"Multi-electrode threshold bracket at {spacing * 1e3:.0f} um "
+    print(f"Multi-electrode threshold reduction at {spacing * 1e3:.0f} um "
           f"spacing, N = 4:")
     print(f"  spread radius        : "
           f"{bracket['spread_radius_mm'] * 1e3:.0f} um")
@@ -218,7 +203,6 @@ def main():
           f"{bracket['floor_fraction'] * 100:.0f}% - "
           f"{bracket['ceiling_fraction'] * 100:.0f}%  ({bracket['regime']})")
     print()
-
 
     plot_electrodes(simulator, out_dir / 'lgn_demo_electrodes.png')
     plot_percept(simulator, out_dir / 'lgn_demo_percept.png')
