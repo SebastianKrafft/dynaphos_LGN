@@ -19,6 +19,10 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
+[project.optional-dependencies]
+# The atlas viewers: dynaphos_lgn.viz3d, .slices and .explore
+viz = ["plotly", "ipywidgets", "anywidget"]
+
 [project.urls]
 "Homepage" = "https://github.com/neuralcodinglab/dynaphos.git"
 
