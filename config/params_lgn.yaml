@@ -281,7 +281,7 @@ receptive_fields:
       parvo: {a_deg: 0.024392, b: 0.399947, r2_log: 0.511}
     surround_center_radius_ratio:   # rs/rc
       parvo: 6.7
-      magno: 6.7
+      magno: 4.8
 
   # Xu, Bonds & Casagrande (2002), owl monkey.
   xu_konio:
@@ -357,11 +357,16 @@ thresholding:
   activation_threshold: 9.141886000943878e-08
   activation_threshold_sd: 6.715877869833961e-08
   # Logistic detection curve instead of a hard step, so electrodes
-  # below threshold still get a gradient.
+  # below threshold still get a gradient. Thresholds already vary
+  # between electrodes with activation_threshold_sd, so the logistic is
+  # kept narrow: at 10 / sd the simulated psychometric curve keeps the
+  # calibrated spread (1 / sd widens it by ~40%, see
+  # experiments/reproduction/).
   soft_threshold: True
-  soft_threshold_slope: null    # null -> 1 / activation_threshold_sd
+  soft_threshold_slope: null    # null -> 10 / activation_threshold_sd
   # What the logistic returns at zero activation:
-  #   none             plain logistic (p(0) is about 0.2)
+  #   none             plain logistic (p(0) is about 1e-6 for a typical
+  #                    threshold, 0.5 for thresholds clipped to 0)
   #   zero_activation  p(a) = (S(a) - S(0)) / (1 - S(0)), so p(0) = 0
   soft_threshold_baseline: zero_activation
 

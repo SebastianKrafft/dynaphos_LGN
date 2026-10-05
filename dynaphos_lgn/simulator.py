@@ -162,10 +162,13 @@ class LGNPhospheneSimulator:
 
         self.soft_threshold = bool(
             require(params, 'thresholding.soft_threshold'))
+        # Thresholds already vary across electrodes with the calibrated
+        # sd, so the logistic stays narrow (10 / sd) to keep the
+        # population curve at the calibrated spread.
         self._soft_threshold_slope = optional(
             params, 'thresholding.soft_threshold_slope',
-            1.0 / max(require(params, 'thresholding.activation_threshold_sd'),
-                      1e-30))
+            10.0 / max(require(params, 'thresholding.activation_threshold_sd'),
+                       1e-30))
 
         self.soft_threshold_baseline = optional(
             params, 'thresholding.soft_threshold_baseline', 'zero_activation')
