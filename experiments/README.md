@@ -11,3 +11,4 @@ what is specific to it:
 | folder           | what it does                                              |
 |------------------|-----------------------------------------------------------|
 | `compare-params` | compares parameter choices under optimised stimulation    |
+| `reproduction`   | reproduces the Dynaphos calibration fits with V1 and LGN  |
