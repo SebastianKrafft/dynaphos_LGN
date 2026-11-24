@@ -1,4 +1,6 @@
 """Renderers: the ellipse shortcut and the per-voxel scatter path."""
+import math
+
 import numpy as np
 import pytest
 import torch
@@ -24,7 +26,7 @@ def _peak_xy(image, params):
 
 
 class TestEllipseRenderer:
-    def test_peak_sits_at_the_requested_centre(self, PARAMS):
+    def test_peak_sits_at_the_requested_center(self, PARAMS):
         centers = np.array([[0.0, 0.0], [4.0, -3.0]])
         r = EllipseGaussianRenderer(centers, np.zeros(2), PARAMS, KW)
         img = r.render(torch.full((2, 1, 1), 1.0),
@@ -34,7 +36,7 @@ class TestEllipseRenderer:
             assert abs(x - c[0]) < 0.3 and abs(y - c[1]) < 0.3
 
     def test_peak_value_is_one(self, PARAMS):
-        """Peak 1, up to pixel quantisation."""
+        """Peak 1, up to pixel quantization."""
         img = EllipseGaussianRenderer(
             np.zeros((1, 2)), np.zeros(1), PARAMS, KW).render(
             torch.full((1, 1, 1), 1.2), torch.full((1, 1, 1), 0.6))
@@ -142,7 +144,7 @@ class TestScatterRenderer:
 
     def test_adaptive_bandwidth_shrinks_for_a_concentrated_cloud(self, PARAMS):
         """At low amplitude only a tight cluster is meaningfully active,
-        and a bandwidth sized for the whole candidate neighbourhood
+        and a bandwidth sized for the whole candidate neighborhood
         would over-smooth it."""
         r, pts = self._make(PARAMS, n=600, seed=7)
         t_pts = torch.as_tensor(pts, dtype=torch.float32)
@@ -162,6 +164,58 @@ class TestScatterRenderer:
             h = r.bandwidth_deg(w, t_pts)
             assert float(h) >= float(r.bandwidth_floor) * 0.9
             assert float(h) <= float(r.bandwidth_ceiling) * 1.1
+
+    def _single_point(self, PARAMS, point_xy, sigma_px, center_xy=(0.0, 0.0)):
+        """Render one point at a wide bandwidth; the ceiling is set just
+        above it, as the simulator's would be for a broad cloud."""
+        gx, _ = visual_field_grid(PARAMS, **KW)
+        sigma_deg = sigma_px * float(gx[0, 1] - gx[0, 0])
+        r = ScatterRenderer(np.array([[point_xy]]), np.array([center_xy]),
+                            PARAMS, np.array([2.0]), np.array([0.05]),
+                            np.array([1.2 * sigma_deg]), KW)
+        return r.render(torch.ones(1, 1), torch.tensor([sigma_deg]))[0], r
+
+    def test_a_wide_splat_falls_off_smoothly_not_in_a_square(self, PARAMS):
+        """One point blurred at a sigma of several pixels must look like
+        a Gaussian all the way out. A kernel truncated near 2 sigma left
+        a 13% step at its edge, so every point became a hard-edged
+        square -- the artifact scatter phosphenes showed at 3-6 deg."""
+        gx, gy = visual_field_grid(PARAMS, **KW)
+        # A pixel center, so the bilinear splat does not smear it.
+        x0, y0 = float(gx[48, 48]), float(gy[48, 48])
+        sigma_px = 6.0
+        img, r = self._single_point(PARAMS, (x0, y0), sigma_px)
+        px = min(r.deg_per_px_x, r.deg_per_px_y)
+        r2 = ((gx - x0) ** 2 + (gy - y0) ** 2) / px ** 2
+        expected = torch.exp(-0.5 * r2 / sigma_px ** 2)
+        assert float((img - expected).abs().max()) < 0.01
+        # No step anywhere: neighboring pixels differ by at most the
+        # steepest slope of the Gaussian itself (~0.1 per px here).
+        steepest = math.exp(-0.5) / sigma_px
+        assert float(img.diff(dim=0).abs().max()) < 1.1 * steepest
+        assert float(img.diff(dim=1).abs().max()) < 1.1 * steepest
+
+    def test_a_point_at_the_patch_rim_is_not_cropped(self, PARAMS):
+        """The patch is padded by the widest kernel the ceiling allows,
+        so a point at the edge of the kept region renders the same splat
+        as one at the patch center."""
+        gx, gy = visual_field_grid(PARAMS, **KW)
+        x0, y0 = float(gx[48, 48]), float(gy[48, 48])
+        rim_x = float(gx[48, 48 + 11])     # 11 px, inside the 2 deg core
+        centered, _ = self._single_point(PARAMS, (rim_x, y0), 5.0,
+                                        center_xy=(rim_x, y0))
+        at_rim, r = self._single_point(PARAMS, (rim_x, y0), 5.0,
+                                       center_xy=(x0, y0))
+        assert torch.allclose(at_rim, centered, atol=1e-5)
+
+    def test_gradient_reaches_the_bandwidth(self, PARAMS):
+        """The taper that removes the kernel's edge step is a function of
+        sigma too, so the blur stays differentiable in the bandwidth."""
+        r, pts = self._make(PARAMS)
+        w = torch.rand(1, pts.shape[1])
+        h = torch.tensor([0.5], requires_grad=True)
+        r.render(w, h).sum().backward()
+        assert torch.isfinite(h.grad).all() and float(h.grad.abs()) > 0
 
     def test_points_outside_the_patch_are_dropped_not_wrapped(self, PARAMS):
         """A point beyond the patch must contribute nothing, rather than

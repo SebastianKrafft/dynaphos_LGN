@@ -4,14 +4,11 @@ Same interface as `ErwinAtlas` (attributes, sentinels, layer codes), so
 tests and demos run without the real data. Not a model of the LGN: use
 it to exercise code, not for results.
 """
-from __future__ import annotations
-
 from typing import Mapping, Tuple
 
 import numpy as np
 
 from dynaphos_lgn.atlas import ErwinAtlas
-from dynaphos_lgn.params import require
 
 
 class SyntheticAtlas(ErwinAtlas):
@@ -28,7 +25,7 @@ class SyntheticAtlas(ErwinAtlas):
 
     def __init__(self, params: Mapping):
         super().__init__(params)
-        cfg = require(params, 'synthetic_atlas')
+        cfg = params['synthetic_atlas']
 
         self.atlas_shape = tuple(int(s) for s in cfg['shape_ml_dv_ap'])
         self.max_eccentricity_deg = float(cfg['max_eccentricity_deg'])
@@ -41,7 +38,6 @@ class SyntheticAtlas(ErwinAtlas):
         self._rng = np.random.default_rng(cfg['seed'])
         self._build()
 
-    # ------------------------------------------------------------------
     def _build(self):
         n_ml, n_dv, n_ap = self.atlas_shape
         ml = np.arange(n_ml)[:, None, None]
@@ -59,7 +55,7 @@ class SyntheticAtlas(ErwinAtlas):
         layer_index = np.clip((dv - m) // band, 0, self.n_layers - 1)
         in_gap = ((dv - m) % band == 0) & (dv > m)
         layer_code = (layer_index % 4) + 1
-        layer = np.where(inside & ~in_gap, layer_code, self._missing_layer)
+        layer = np.where(inside & ~in_gap, layer_code, self.missing_layer)
         layer = np.broadcast_to(layer, self.atlas_shape).astype(np.int8)
 
         # --- eccentricity: exponential along AP ------------------------
@@ -82,11 +78,11 @@ class SyntheticAtlas(ErwinAtlas):
         # The gaps carry retinotopy but no layer, like the real atlas's
         # interlaminar zones.
         self.eccentricity = np.where(
-            inside, np.round(ecc_deg * self._ecc_scale),
-            self._missing_ecc_incl).astype(np.int16)
+            inside, np.round(ecc_deg * self.ecc_scale),
+            self.missing_ecc_incl).astype(np.int16)
         self.inclination = np.where(
-            inside, np.round(incl_deg * self._incl_scale),
-            self._missing_ecc_incl).astype(np.int16)
+            inside, np.round(incl_deg * self.incl_scale),
+            self.missing_ecc_incl).astype(np.int16)
         self.layer = layer
 
         # --- cell counts: falling with eccentricity, lightly jittered ---
@@ -94,14 +90,17 @@ class SyntheticAtlas(ErwinAtlas):
         jitter = self._rng.normal(1.0, self._density_jitter_sd,
                                   size=self.atlas_shape)
         cells = np.where(valid, np.clip(density * jitter, 0, None), 0.0)
-        self.cells = np.round(cells * self._cells_scale).astype(np.int16)
+        self.cells = np.round(cells * self.cells_scale).astype(np.int16)
 
+        self.clear_foveal_placeholder()
         self.update_valid()
-        self.eccentricity_deg = self.eccentricity / self._ecc_scale
-        self.inclination_deg = self.inclination / self._incl_scale
-        self.cells_per_voxel = self.cells / self._cells_scale
+        # The closed-form map puts the fovea on a sheet, not a column.
+        self.foveola_column = np.argwhere(self.valid
+                                          & (self.eccentricity == 0))
+        self.eccentricity_deg = self.eccentricity / self.ecc_scale
+        self.inclination_deg = self.inclination / self.incl_scale
+        self.cells_per_voxel = self.cells / self.cells_scale
 
-    # ------------------------------------------------------------------
     def analytic_magnification_deg_per_mm(self, eccentricity_deg
                                           ) -> Tuple[np.ndarray, np.ndarray]:
         """The map's exact (along-eccentricity, along-inclination)
@@ -109,18 +108,18 @@ class SyntheticAtlas(ErwinAtlas):
         e = np.asarray(eccentricity_deg, dtype=float)
         n_ml, _, n_ap = self.atlas_shape
         m = self.margin_vox
-        span_mm = max(n_ap - 2 * m - 1, 1) * self._voxel_size_mm
+        span_mm = max(n_ap - 2 * m - 1, 1) * self.voxel_size_mm
         lam_mm = span_mm / np.log1p(self.max_eccentricity_deg
                                     / self.eccentricity_scale_deg)
         d_ecc = (e + self.eccentricity_scale_deg) / lam_mm
 
-        ml_span_mm = max(n_ml - 2 * m - 1, 1) * self._voxel_size_mm
+        ml_span_mm = max(n_ml - 2 * m - 1, 1) * self.voxel_size_mm
         d_incl_deg_per_mm = self.inclination_span_deg / ml_span_mm
         # Visual-field displacement per degree of inclination is
         # E * dI(rad), so the tangential magnification scales with E.
         d_incl = e * np.deg2rad(d_incl_deg_per_mm)
         return d_ecc, d_incl
 
-    def build_atlas(self, atlas_dir=None) -> 'SyntheticAtlas':
+    def read(self, atlas_dir=None) -> 'SyntheticAtlas':
         """No-op: a synthetic atlas is built in `__init__`."""
         return self

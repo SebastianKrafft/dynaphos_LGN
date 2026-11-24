@@ -20,16 +20,13 @@ flipped so it looks upright; reload it with
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from dynaphos.utils import load_params                              # noqa: E402
-from dynaphos_lgn.params import require                             # noqa: E402
+from dynaphos.utils import load_params
+from dynaphos_lgn.params import PARAMS_PATH
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -42,11 +39,11 @@ BAR_BANDS = [(2.0, Y_MAX, 1.2), (-1.75, 1.75, 0.6), (-Y_MAX, -2.25, 0.3)]
 
 
 def coordinate_grid(params):
-    """(X, Y) pixel-centre coordinates in degrees, row 0 = bottom, as in
+    """(X, Y) pixel-center coordinates in degrees, row 0 = bottom, as in
     `dynaphos_lgn.rendering.visual_field_grid`."""
-    res_x, res_y = require(params, 'run.resolution')
-    x_org, y_org = require(params, 'run.origin')
-    half = require(params, 'run.view_angle') / 2
+    res_x, res_y = params['run']['resolution']
+    x_org, y_org = params['run']['origin']
+    half = params['run']['view_angle'] / 2
     x = np.linspace(x_org - half, x_org + half, res_x)
     y = np.linspace(y_org - half, y_org + half, res_y)
     return np.meshgrid(x, y)
@@ -106,11 +103,11 @@ def simulate(params, image, out_path, atlas_dir, n_electrodes):
     params['electrodes']['max_eccentricity_deg'] = X_MAX
     simulator, _ = build_simulator(params, atlas_dir=atlas_dir)
 
-    stimulus = image * require(params, 'sampling.stimulus_scale')
+    stimulus = image * params['sampling']['stimulus_scale']
     simulator.reset()
     percept = simulator(simulator.sample_stimulus(stimulus)).detach().numpy()
 
-    half = require(params, 'run.view_angle') / 2
+    half = params['run']['view_angle'] / 2
     extent = [-half, half, -half, half]
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.6))
     axes[0].imshow(image, cmap='gray', origin='lower', vmin=0, vmax=1,
@@ -136,7 +133,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pattern', choices=sorted(PATTERNS), default='bars')
     parser.add_argument('--params',
-                        default=str(REPO / 'config' / 'params_lgn.yaml'))
+                        default=str(PARAMS_PATH))
     parser.add_argument('--out', default=None,
                         help='output PNG (default: out/right_hemifield_<pattern>.png '
                              'next to this script)')
@@ -157,7 +154,7 @@ def main():
     # Flipped on the way out: PNG row 0 is the top, ours is the bottom.
     cv2.imwrite(str(out), (image[::-1] * 255).astype(np.uint8))
 
-    res_x = require(params, 'run.resolution')[0]
+    res_x = params['run']['resolution'][0]
     left = image[:, :res_x // 2].sum()
     print(f"Wrote {out} ({args.pattern}).")
     print(f"  ink in the left half : {left:.0f} pixels")

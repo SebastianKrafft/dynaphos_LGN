@@ -1,73 +1,64 @@
 """Current spread and tissue recruitment for LGN microstimulation.
 
 How far the current reaches (Stoney/Tehovnik, ``R = sqrt(I / K)``) and
-how strongly each nearby voxel is recruited, from one shared kernel. The
-kernel is smooth so that recruitment stays differentiable in the current.
+how strongly each nearby voxel is recruited, from one Gaussian kernel.
+The kernel is smooth so that recruitment stays differentiable in the
+current.
 """
-from __future__ import annotations
-
 import math
 from dataclasses import dataclass
-from typing import Mapping, Tuple, Union
+from typing import Sequence, Tuple, Union
 
 import numpy as np
 import torch
 
-from dynaphos_lgn.params import require
-
 Tensorish = Union[float, np.ndarray, torch.Tensor]
 
 
-def _logit(p: float) -> float:
-    return math.log(p / (1.0 - p))
-
-
-def excitability_constant_ua_per_mm2(params: Mapping) -> float:
-    """K in uA/mm^2."""
-    return float(require(params, 'current_spread.k_ua_per_mm2'))
-
-
-def lgn_threshold_ua(params: Mapping) -> Tuple[float, float]:
+def lgn_threshold_ua(params: dict) -> Tuple[float, float]:
     """(mean, sd) single-electrode LGN detection threshold, uA."""
-    mean, sd = require(params, 'benchmarks.pezaris_2007.threshold_ua')
+    mean, sd = params['benchmarks']['pezaris_2007']['threshold_ua']
     return float(mean), float(sd)
 
 
 def stoney_radius_mm(current_ua: Tensorish,
                      k_ua_per_mm2: float) -> Tensorish:
-    """Activated-tissue radius R = sqrt(I/K), in mm (not the diameter)."""
+    """Activated-tissue radius R = sqrt(I/K), in mm (not the diameter).
+
+    Zero at I <= 0, with a zero gradient there rather than sqrt's inf.
+    """
     if isinstance(current_ua, torch.Tensor):
-        return torch.sqrt(torch.clamp(current_ua, min=0.0) / k_ua_per_mm2)
+        # Double where: the sqrt never sees 0, so 0 * inf cannot give NaN.
+        on = current_ua > 0
+        safe = torch.where(on, current_ua, torch.ones_like(current_ua))
+        return torch.where(on, torch.sqrt(safe / k_ua_per_mm2),
+                           torch.zeros_like(current_ua))
     return np.sqrt(np.clip(np.asarray(current_ua, float), 0, None)
                    / k_ua_per_mm2)
 
 
-def bosking_diameter_mm(current_ua: Tensorish, max_diameter_mm: float,
-                        slope_per_ua: float,
-                        i_half_ua: float) -> Tensorish:
-    """Saturating alternative to Stoney's square root (Bosking et al. 2017)."""
-    if isinstance(current_ua, torch.Tensor):
-        return max_diameter_mm * torch.sigmoid(
-            slope_per_ua * (current_ua - i_half_ua))
-    return max_diameter_mm / (1.0 + np.exp(
-        -slope_per_ua * (np.asarray(current_ua, float) - i_half_ua)))
+def excitability_constant_ua_per_mm2(params: dict) -> float:
+    """K in uA/mm^2."""
+    return float(params['current_spread']['k_ua_per_mm2'])
 
 
-def k_for_cell_class(cell_class: str, params: Mapping) -> float:
-    """K, optionally scaled by cell-class soma size.
+def k_for_cell_class(cell_class: Union[str, Sequence[str]],
+                     params: dict) -> float:
+    """K, optionally scaled by the axon diameter of the cell class.
 
     `current_spread.class_scaling` is 'none', 'diameter' (K ~ 1/d) or
-    'diameter_squared' (K ~ 1/d^2).
+    'diameter_squared' (K ~ 1/d^2). A list of classes uses the mean of
+    their diameters.
     """
+    p = params['current_spread']
     k_reference = excitability_constant_ua_per_mm2(params)
-    reference_class = require(params,
-                              'current_spread.class_scaling_reference')
-    scaling = require(params, 'current_spread.class_scaling')
+    scaling = p['class_scaling']
     if scaling == 'none':
         return k_reference
-    diameters = 'current_spread.nucleolus_diameter_um'
-    d = require(params, f'{diameters}.{cell_class}')
-    d_ref = require(params, f'{diameters}.{reference_class}')
+    diameters = p['axon_diameter_um']
+    names = [cell_class] if isinstance(cell_class, str) else list(cell_class)
+    d = float(np.mean([diameters[name] for name in names]))
+    d_ref = diameters[p['class_scaling_reference']]
     if scaling == 'diameter':
         return k_reference * (d_ref / d)
     if scaling == 'diameter_squared':
@@ -76,73 +67,38 @@ def k_for_cell_class(cell_class: str, params: Mapping) -> float:
                      f"'none', 'diameter' or 'diameter_squared'.")
 
 
-# ----------------------------------------------------------------------
-# Recruitment kernels
-# ----------------------------------------------------------------------
-
 @dataclass
 class RecruitmentKernel:
-    """Smooth, differentiable tissue-recruitment weight w(distance, I).
+    """Gaussian tissue-recruitment weight w(distance, I).
 
     The weight equals `contour_value` at exactly the spread radius R(I),
     so phosphene size and per-layer recruitment use the same radius.
 
-    :ivar shape: 'gaussian' or 'logistic'.
     :ivar contour_value: Weight at r = R(I). 1/e^2 makes `radius_to_sigma`
         equal V1 Dynaphos's 0.5.
-    :ivar logistic_softness: Transition width of the logistic kernel, as
-        a fraction of R(I).
     :ivar k: Excitability constant, uA/mm^2.
-    :ivar spread_model: 'stoney' (sqrt) or 'bosking' (sigmoid).
     """
 
-    shape: str
     contour_value: float
-    logistic_softness: float
     k: float
-    spread_model: str
-    bosking_max_diameter_mm: float
-    bosking_slope_per_ua: float
-    bosking_i_half_ua: float
 
     @classmethod
-    def from_params(cls, params: Mapping) -> 'RecruitmentKernel':
+    def from_params(cls, params: dict) -> 'RecruitmentKernel':
         """The kernel the config describes, with K scaled for
         `electrodes.cell_class` when one is set."""
-        cell_class = require(params, 'electrodes.cell_class')
-        bosking = require(params, 'current_spread.bosking')
+        cell_class = params['electrodes']['cell_class']
         return cls(
-            shape=require(params, 'current_spread.kernel_shape'),
-            contour_value=require(params, 'current_spread.contour_value'),
-            logistic_softness=require(params,
-                                      'current_spread.logistic_softness'),
+            contour_value=params['current_spread']['contour_value'],
             k=(excitability_constant_ua_per_mm2(params) if cell_class is None
-               else k_for_cell_class(cell_class, params)),
-            spread_model=require(params, 'current_spread.spread_model'),
-            bosking_max_diameter_mm=bosking['max_diameter_mm'],
-            bosking_slope_per_ua=bosking['slope_per_ua'],
-            bosking_i_half_ua=bosking['i_half_ua'])
-
-    @property
-    def _logistic_offset(self) -> float:
-        return _logit(self.contour_value)
+               else k_for_cell_class(cell_class, params)))
 
     def __post_init__(self):
-        if self.shape not in ('gaussian', 'logistic'):
-            raise ValueError("shape must be 'gaussian' or 'logistic'.")
         if not 0.0 < self.contour_value < 1.0:
             raise ValueError("contour_value must lie strictly in (0, 1).")
-        if self.spread_model not in ('stoney', 'bosking'):
-            raise ValueError("spread_model must be 'stoney' or 'bosking'.")
 
-    # -- radii --------------------------------------------------------
     def radius_mm(self, current_ua: Tensorish) -> Tensorish:
         """Nominal activated-tissue radius at this current."""
-        if self.spread_model == 'stoney':
-            return stoney_radius_mm(current_ua, self.k)
-        return 0.5 * bosking_diameter_mm(
-            current_ua, self.bosking_max_diameter_mm,
-            self.bosking_slope_per_ua, self.bosking_i_half_ua)
+        return stoney_radius_mm(current_ua, self.k)
 
     @property
     def radius_to_sigma(self) -> float:
@@ -156,7 +112,6 @@ class RecruitmentKernel:
         """Gaussian sigma of the recruitment profile, mm."""
         return self.radius_mm(current_ua) * self.radius_to_sigma
 
-    # -- weights ------------------------------------------------------
     def weights(self, distance_mm: torch.Tensor,
                 current_ua: torch.Tensor) -> torch.Tensor:
         """Recruitment weight in [0, 1], differentiable in `current_ua`.
@@ -167,74 +122,32 @@ class RecruitmentKernel:
         """
         radius = self.radius_mm(current_ua)
         eps = torch.finfo(distance_mm.dtype).tiny
-        if self.shape == 'gaussian':
-            sigma = torch.clamp(radius * self.radius_to_sigma, min=eps)
-            return torch.exp(-0.5 * (distance_mm / sigma) ** 2)
-        softness = torch.clamp(radius * self.logistic_softness, min=eps)
-        # At d = R the argument reduces to logit(contour_value).
-        offset = self._logistic_offset
-        return torch.sigmoid(-(distance_mm - radius) / softness + offset)
+        sigma = torch.clamp(radius * self.radius_to_sigma, min=eps)
+        return torch.exp(-0.5 * (distance_mm / sigma) ** 2)
 
     def effective_radius_mm(self, current_ua: Tensorish,
                             tail_weight: float = 1e-3) -> Tensorish:
         """Radius beyond which the weight drops under `tail_weight`.
 
-        Use this, not `radius_mm`, to size a candidate neighbourhood, or
+        Use this, not `radius_mm`, to size a candidate neighborhood, or
         the kernel's tail gets clipped.
         """
-        if self.shape == 'gaussian':
-            factor = math.sqrt(-2.0 * math.log(tail_weight)) \
-                     * self.radius_to_sigma
-        else:
-            # sigmoid(-(d - R)/s + offset) = tail
-            #   =>  d = R + s * (offset - logit(tail))
-            factor = 1.0 + self.logistic_softness * (
-                self._logistic_offset - _logit(tail_weight))
+        factor = math.sqrt(-2.0 * math.log(tail_weight)) \
+                 * self.radius_to_sigma
         return self.radius_mm(current_ua) * factor
 
+    def weights_from_drive(self, drive: torch.Tensor) -> torch.Tensor:
+        """Recruitment weight from a summed, threshold-normalized drive.
 
-def threshold_reduction_bracket(n_electrodes: int, spacing_mm: float,
-                                params: Mapping) -> dict:
-    """Bound the multi-electrode threshold reduction under field summation.
+        One electrode's drive at distance d is ``(R / d)^2 = I / (K d^2)``,
+        a point source's current density over the recruitment threshold,
+        so ``drive = 1`` is the R(I) contour and for a single electrode
+        this equals ``weights(d, I)``. Drives from several electrodes add.
+        """
+        drive = torch.clamp(drive, min=1e-12)
+        return torch.exp(-0.5 / (self.radius_to_sigma ** 2 * drive))
 
-    The size of the effect depends on electrode spacing relative to the
-    spread radius. Floor from Callier et al. (2015), ceiling from Kunigk
-    et al. (2022).
-
-    :return: dict with ``spread_radius_mm``, ``spacing_over_radius``,
-        ``floor_fraction``, ``ceiling_fraction`` and ``regime``.
-    """
-    current_ua = lgn_threshold_ua(params)[0]
-    k_ua_per_mm2 = excitability_constant_ua_per_mm2(params)
-    cfg = require(params, 'benchmarks.multi_electrode')
-
-    radius = float(stoney_radius_mm(current_ua, k_ua_per_mm2))
-    ratio = spacing_mm / radius if radius > 0 else float('inf')
-
-    # log2 ramp from 0 at one electrode to 1 at saturates_at_n_electrodes
-    saturates_at = max(float(cfg['saturates_at_n_electrodes']), 1.0)
-    saturation_fraction = min(1.0, math.log2(max(n_electrodes, 1))
-                              / max(math.log2(saturates_at), 1e-9))
-
-    floor = cfg['low_overlap_max_reduction'] * saturation_fraction
-    vanish = float(cfg['field_summation_vanishes_at_radii'])
-    overlap = max(0.0, 1.0 - ratio / vanish)
-    ceiling = (cfg['field_summation_max_reduction'] * saturation_fraction
-               * overlap)
-
-    if ratio <= 1.0:
-        regime = 'high overlap (spacing <= spread radius)'
-    elif ratio <= vanish:
-        regime = 'partial overlap'
-    else:
-        regime = f'low overlap (spacing > {vanish:g}x radius)'
-
-    return {
-        'n_electrodes': n_electrodes,
-        'spacing_mm': spacing_mm,
-        'spread_radius_mm': radius,
-        'spacing_over_radius': ratio,
-        'floor_fraction': floor,
-        'ceiling_fraction': max(floor, ceiling),
-        'regime': regime,
-    }
+    def scale_current(self, current_ua: torch.Tensor,
+                      radius_factor: torch.Tensor) -> torch.Tensor:
+        """The current whose radius is ``radius_factor * R(current)``."""
+        return current_ua * radius_factor ** 2

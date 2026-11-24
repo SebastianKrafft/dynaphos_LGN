@@ -6,8 +6,6 @@ spatial: recruitment over atlas voxels, grouped by layer, and phosphene
 geometry from the local magnification. Gradients reach amplitude, pulse
 width and frequency, not electrode positions.
 """
-from __future__ import annotations
-
 import logging
 import os
 from typing import Dict, Optional, Tuple
@@ -17,56 +15,45 @@ import torch
 
 from dynaphos.image_processing import scale_image
 from dynaphos.simulator import (Activation, ActivationThreshold, Brightness,
-                                Trace)
+                                State, Trace)
 from dynaphos.utils import (get_data_kwargs, get_deg2pix_coeff, print_stats,
                             set_deterministic, to_numpy, to_tensor)
+from dynaphos_lgn.aggregation import (Independent, build_aggregation,
+                                      effective_mode)
 from dynaphos_lgn.current_spread import RecruitmentKernel
 from dynaphos_lgn.electrodes import LGNElectrodeArray
-from dynaphos_lgn.params import (ParameterError, class_membership, optional,
-                                 require)
-from dynaphos_lgn.receptive_fields import center_radius_deg
+from dynaphos_lgn.merging import build_merging
+from dynaphos_lgn.receptive_fields import center_radius_by_class
 from dynaphos_lgn.rendering import (EllipseGaussianRenderer, ScatterRenderer,
                                     visual_field_grid)
 
 
-class LGNSize:
+class LGNSize(State):
     """Phosphene sigmas in degrees, from current via the local
-    magnification. Anything with `update` and `get` can replace it."""
+    magnification. The LGN counterpart of Dynaphos's `Sigma`."""
 
-    def __init__(self, shape: Tuple[int, ...],
+    def __init__(self, params: dict, shape: Tuple[int, ...],
                  kernel: RecruitmentKernel,
                  major_deg_per_mm: np.ndarray, minor_deg_per_mm: np.ndarray,
-                 data_kwargs: dict, verbose: bool = False):
+                 verbose: bool = False):
         self.kernel = kernel
-        self.shape = shape
-        self.verbose = verbose
-        self.data_kwargs = data_kwargs
-
         major = np.asarray(major_deg_per_mm, dtype=float).ravel()
         minor = np.asarray(minor_deg_per_mm, dtype=float).ravel()
 
         # No usable magnification: render at zero size, and say so.
         self.no_magnification = ~(np.isfinite(major) & np.isfinite(minor))
-        n_bad = int(self.no_magnification.sum())
-        if n_bad:
+        if self.no_magnification.any():
             logging.warning(
                 "%d of %d electrodes have no finite local magnification "
-                "and will render as zero-size (invisible) phosphenes; "
-                "their recruitment is still computed. Electrode indices: "
-                "%s. See `.no_magnification` for the full mask.",
-                n_bad, self.no_magnification.size,
+                "and render as zero-size phosphenes: %s.",
+                int(self.no_magnification.sum()), self.no_magnification.size,
                 np.array2string(np.flatnonzero(self.no_magnification),
                                 threshold=20))
-
-        self.major = to_tensor(
-            np.reshape(np.where(self.no_magnification, 0.0, major),
-                       shape[-3:]), **data_kwargs)
-        self.minor = to_tensor(
-            np.reshape(np.where(self.no_magnification, 0.0, minor),
-                       shape[-3:]), **data_kwargs)
-        self.sigma_major = None
-        self.sigma_minor = None
-        self.reset()
+        super().__init__(params, shape, verbose)
+        self.major = self.to_tensor(np.reshape(
+            np.where(self.no_magnification, 0.0, major), shape[-3:]))
+        self.minor = self.to_tensor(np.reshape(
+            np.where(self.no_magnification, 0.0, minor), shape[-3:]))
 
     def reset(self):
         self.sigma_major = torch.zeros(self.shape, **self.data_kwargs)
@@ -85,9 +72,9 @@ class LGNSize:
 class LGNPhospheneSimulator:
     """Differentiable LGN phosphene simulator.
 
-    :param params: Nested parameter dict, see `config/params_lgn.yaml`.
+    :param params: Nested parameter dict, see `dynaphos_lgn/config/params_lgn.yaml`.
     :param electrode_array: A built `LGNElectrodeArray`.
-    :param rng: Numpy generator, used for threshold initialisation.
+    :param rng: Numpy generator, used for threshold initialization.
 
     `safety_limit_ua` (from `default_stim.safety_limit_ua`) is for
     whatever chooses the amplitudes; the forward pass does not clamp.
@@ -98,29 +85,27 @@ class LGNPhospheneSimulator:
         self.params = params
         self.array = electrode_array
         self.safety_limit_ua = float(
-            require(params, 'default_stim.safety_limit_ua'))
+            params['default_stim']['safety_limit_ua'])
         if not 0 < self.safety_limit_ua <= electrode_array.max_current_ua:
-            raise ParameterError(
-                f"default_stim.safety_limit_ua is {self.safety_limit_ua} "
-                f"uA; it must be positive and at most "
-                f"electrodes.max_current_ua ({electrode_array.max_current_ua}"
-                f" uA), the current the array's neighbourhoods are "
-                f"precomputed for.")
+            raise ValueError(
+                f"default_stim.safety_limit_ua ({self.safety_limit_ua} uA) "
+                f"must be positive and at most electrodes.max_current_ua "
+                f"({electrode_array.max_current_ua} uA).")
         self.data_kwargs = get_data_kwargs(params)
-        self.verbose = require(params, 'run.print_stats')
-        self.adaptive_scatter_bandwidth = require(
-            params, 'rendering.adaptive_scatter_bandwidth')
+        self.verbose = params['run']['print_stats']
+        self.adaptive_scatter_bandwidth = params['rendering'][
+            'adaptive_scatter_bandwidth']
 
         rng = np.random.default_rng() if rng is None else rng
         # Deterministic mode refuses cuBLAS matmuls on CUDA without this
         os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
-        set_deterministic(require(params, 'run.seed'))
+        set_deterministic(params['run']['seed'])
         self.deg2pix_coeff = get_deg2pix_coeff(params['run'])
 
         self.kernel = electrode_array.kernel
         self.num_phosphenes = electrode_array.n_electrodes
 
-        batch_size = require(params, 'run.batch_size')
+        batch_size = params['run']['batch_size']
         if batch_size:
             self.shape = (batch_size, self.num_phosphenes, 1, 1)
             self._electrode_dimension = 1
@@ -130,7 +115,6 @@ class LGNPhospheneSimulator:
         self.batch_size = batch_size
 
         self._warn_about_out_of_view_electrodes()
-        self._build_class_mixture()
         self._build_renderers()
         self._build_recruitment_buffers()
 
@@ -139,44 +123,40 @@ class LGNPhospheneSimulator:
         self.brightness = Brightness(params, self.shape)
         self.threshold = ActivationThreshold(params, self.shape, rng)
         self.size = LGNSize(
-            self.shape, self.kernel,
+            params, self.shape, self.kernel,
             electrode_array.local_magnification.major_deg_per_mm,
             electrode_array.local_magnification.minor_deg_per_mm,
-            self.data_kwargs, self.verbose)
+            self.verbose)
         self.no_magnification = self.size.no_magnification
 
         self.effective_charge_per_second = None
         self.layer_activation = None
         self.recruited_cells = None
-        self.class_fraction = None
+        self._volumes = None
+        self._last_amplitude_ua = None
 
         self._sampling_mask = None
         self._phosphene_maps = None
         self._phosphene_centers = None
-        self._sampling_method = require(params, 'sampling.sampling_method')
-        self._pulse_width = (require(params, 'default_stim.pw_default')
+        self._sampling_method = params['sampling']['sampling_method']
+        self._pulse_width = (params['default_stim']['pw_default']
                              * torch.ones(self.shape, **self.data_kwargs))
-        self._frequency = (require(params, 'default_stim.freq_default')
+        self._frequency = (params['default_stim']['freq_default']
                            * torch.ones(self.shape, **self.data_kwargs))
         self._zero = to_tensor(0, **self.data_kwargs)
 
-        self.soft_threshold = bool(
-            require(params, 'thresholding.soft_threshold'))
+        thresholding = params['thresholding']
+        self.soft_threshold = bool(thresholding['soft_threshold'])
         # Thresholds already vary across electrodes with the calibrated
         # sd, so the logistic stays narrow (10 / sd) to keep the
         # population curve at the calibrated spread.
-        self._soft_threshold_slope = optional(
-            params, 'thresholding.soft_threshold_slope',
-            10.0 / max(require(params, 'thresholding.activation_threshold_sd'),
-                       1e-30))
-
-        self.soft_threshold_baseline = optional(
-            params, 'thresholding.soft_threshold_baseline', 'zero_activation')
+        self._soft_threshold_slope = thresholding['soft_threshold_slope']
+        if self._soft_threshold_slope is None:
+            self._soft_threshold_slope = 10.0 / max(
+                thresholding['activation_threshold_sd'], 1e-30)
+        self.soft_threshold_baseline = thresholding['soft_threshold_baseline']
         self.reset()
-
-    # ------------------------------------------------------------------
     # Setup
-    # ------------------------------------------------------------------
     @property
     def electrode_dimension(self) -> int:
         """Tensor dimension of the electrodes: 0 unbatched, 1 batched."""
@@ -211,8 +191,8 @@ class LGNPhospheneSimulator:
         return self.array.phosphene_sigma_deg(current_ua)
 
     def _warn_about_out_of_view_electrodes(self):
-        half = require(self.params, 'run.view_angle') / 2
-        origin = np.asarray(require(self.params, 'run.origin'), dtype=float)
+        half = self.params['run']['view_angle'] / 2
+        origin = np.asarray(self.params['run']['origin'], dtype=float)
         offset = np.abs(self.array.vf_xy - origin)
         outside = np.any(offset > half, axis=1) | ~np.isfinite(
             self.array.vf_xy).all(axis=1)
@@ -225,36 +205,6 @@ class LGNPhospheneSimulator:
                 "run.view_angle or lower electrodes.max_eccentricity_deg "
                 "to see them.", int(outside.sum()), self.num_phosphenes,
                 2 * half)
-
-    def _build_class_mixture(self):
-        """Layer-to-class membership and per-class receptive-field widths
-        for the 'class_mixture' percept; no classes for 'single'."""
-        model = require(self.params, 'percept.model')
-        if model not in ('single', 'class_mixture'):
-            raise ParameterError(f"Unknown percept.model {model!r}; expected "
-                                 f"'single' or 'class_mixture'.")
-        self.classes = ([] if model == 'single' else list(
-            optional(self.params, 'percept.classes', None)
-            or require(self.params, 'cell_classes')))
-        if not self.classes:
-            return
-        array = self.array
-        membership = class_membership(self.params, array.layer_ids,
-                                      self.classes)
-        self._membership = to_tensor(membership, **self.data_kwargs)
-
-        scale = require(self.params, 'percept.rf_blur_scale')
-        form = require(self.params, 'percept.rf_form')
-        ecc = np.nan_to_num(array.eccentricity_deg)
-        self.rf_sigma_deg = np.stack(
-            [scale * center_radius_deg(ecc, self.params, c, form)
-             for c in self.classes], axis=-1) / np.sqrt(2.0)
-        self._rf_sigma = to_tensor(self.rf_sigma_deg, **self.data_kwargs)
-
-        point_layer = array.candidate_layer[:, array.scatter_index]
-        onehot = (point_layer[..., None] == array.layer_ids).astype(
-            np.float32)
-        self._point_class = onehot @ membership   # (n, points, classes)
 
     def _build_renderers(self):
         array = self.array
@@ -273,20 +223,12 @@ class LGNPhospheneSimulator:
         if len(self.scatter_index):
             idx = self.scatter_index
             patch_radius = array.scatter_patch_radius_deg()[idx]
-            ceiling_fraction = require(
-                self.params, 'rendering.scatter_bandwidth_ceiling_fraction')
-            # Room for the receptive-field widening
-            rf_sigma = (self.rf_sigma_deg[idx].max(axis=-1) if self.classes
-                        else np.zeros(len(idx)))
+            ceiling_fraction = self.params['rendering'][
+                'scatter_bandwidth_ceiling_fraction']
             self.scatter_renderer = ScatterRenderer(
-                array.scatter_points_xy[idx],
-                array.vf_xy[idx],
-                self.params,
-                patch_radius + 3 * rf_sigma,
-                array.scatter_bandwidth_floor_deg[idx],
-                ceiling_fraction * patch_radius,
-                self.data_kwargs,
-                extra_blur_deg=float(rf_sigma.max()))
+                array.scatter_points_xy[idx], array.vf_xy[idx], self.params,
+                patch_radius, array.scatter_bandwidth_floor_deg[idx],
+                ceiling_fraction * patch_radius, self.data_kwargs)
 
     def _build_recruitment_buffers(self):
         array = self.array
@@ -297,11 +239,21 @@ class LGNPhospheneSimulator:
         self._layer_counts = to_tensor(hist['counts'], **self.data_kwargs)
         self._layer_cells = to_tensor(hist['cells'], **self.data_kwargs)
 
+        self.aggregation_configured = self.params['aggregation']['mode']
+        self.aggregation_effective = effective_mode(self.params)
+        self.aggregation = build_aggregation(array, self.params,
+                                             self.data_kwargs, hist)
+        if self.aggregation_effective != self.aggregation_configured:
+            logging.warning(
+                "aggregation.mode is %r but aggregation.simultaneous_pulses "
+                "is false, so electrodes aggregate independently.",
+                self.aggregation_configured)
+        logging.info("Aggregation: configured %s, effective %s.",
+                     self.aggregation_configured,
+                     self.aggregation.describe())
+        self.merging = build_merging(array, self.params, self.data_kwargs)
+
         if len(self.scatter_index):
-            if self.classes:
-                self._scatter_point_class = to_tensor(
-                    self._point_class[self.scatter_index],
-                    **self.data_kwargs)
             self._scatter_distance = to_tensor(
                 array.scatter_distance_mm, **self.data_kwargs)
             self._scatter_mask = to_tensor(
@@ -310,10 +262,7 @@ class LGNPhospheneSimulator:
             self._scatter_points = to_tensor(
                 array.scatter_points_xy[self.scatter_index],
                 **self.data_kwargs)
-
-    # ------------------------------------------------------------------
     # Runtime
-    # ------------------------------------------------------------------
     def reset(self):
         self.activation.reset()
         self.trace.reset()
@@ -325,9 +274,19 @@ class LGNPhospheneSimulator:
     def get_current(self, amplitude: torch.Tensor, frequency: torch.Tensor,
                     pulse_width: torch.Tensor) -> torch.Tensor:
         """Effective charge per second from a square-wave pulse train,
-        as in Dynaphos's V1 model."""
-        leak = self.trace.get() + require(self.params,
-                                          'thresholding.rheobase')
+        as in Dynaphos's V1 model, but with a Lapicque strength-duration
+        threshold: shorter pulses need more current. A chronaxie of 0
+        gives the V1 model's constant rheobase.
+
+        :param amplitude: Stimulation amplitudes for each electrode.
+        :param pulse_width: Stimulation pulse widths for each electrode.
+        :param frequency: Stimulation frequencies for each electrode.
+        """
+        rheobase = self.params['thresholding']['rheobase']
+        chronaxie = self.params['default_stim']['chronaxie_s']
+        # 1 ns floor keeps the threshold finite at zero pulse width
+        safe_pulse_width = torch.clamp(pulse_width, min=1e-9)
+        leak = self.trace.get() + rheobase * (1 + chronaxie / safe_pulse_width)
         charge_per_s = torch.relu((amplitude - leak) * pulse_width * frequency)
         self.effective_charge_per_second = charge_per_s
         print_stats('charge per second', charge_per_s, self.verbose)
@@ -373,29 +332,38 @@ class LGNPhospheneSimulator:
             frequency = self._frequency
 
         amplitude = self._as_input(amplitude)
+        unit_to_ua = self.params['run']['current_unit_to_ua']
+        aggregate = None
+        stimulated_ua = (amplitude * unit_to_ua).reshape(self.shape[:-2])
+        self._volumes = (None if self.merging is None
+                         else self.merging.volumes(stimulated_ua))
+        if not isinstance(self.aggregation, Independent):
+            # Everything downstream sees the equivalent current.
+            aggregate = self.aggregation(stimulated_ua)
+            amplitude = (aggregate.amplitude_ua / unit_to_ua).reshape(
+                self.shape)
+
         charge_per_s = self.get_current(amplitude,
                                         self._as_input(frequency),
                                         self._as_input(pulse_width))
         self.activation.update(charge_per_s)
         self.trace.update(charge_per_s)
 
-        amplitude_ua = amplitude * require(self.params,
-                                           'run.current_unit_to_ua')
+        amplitude_ua = amplitude * unit_to_ua
         self.size.update(amplitude_ua)
-        self.layer_activation, self.recruited_cells = \
-            self.recruitment(amplitude_ua)
-        if self.classes:
-            class_cells = self.recruited_cells @ self._membership
-            total = class_cells.sum(dim=-1, keepdim=True)
-            self.class_fraction = class_cells / torch.clamp(
-                total, min=torch.finfo(total.dtype).tiny)
+        if aggregate is not None and aggregate.per_layer_weight is not None:
+            self.layer_activation = aggregate.per_layer_weight
+            self.recruited_cells = aggregate.per_layer_cells
+        else:
+            self.layer_activation, self.recruited_cells = \
+                self.recruitment(amplitude_ua)
         self.brightness.update(self.activation.get())
         self._last_amplitude_ua = amplitude_ua
 
     def spatial_activation(self) -> torch.Tensor:
         """Per-electrode activation maps over the visual field, peak 1,
         in the original electrode order."""
-        res_x, res_y = require(self.params, 'run.resolution')
+        res_x, res_y = self.params['run']['resolution']
         lead = self.shape[:-3]
         out = torch.zeros((*lead, self.num_phosphenes, res_y, res_x),
                           **self.data_kwargs)
@@ -406,12 +374,8 @@ class LGNPhospheneSimulator:
                                   device=out.device, dtype=torch.long)
             sa = self.size.sigma_major.index_select(dim, idx)
             sb = self.size.sigma_minor.index_select(dim, idx)
-
-            def render_ellipse(rf, c):
-                rf = None if rf is None else rf[:, None, None]
-                return self.ellipse_renderer.render(_widen(sa, rf),
-                                                    _widen(sb, rf))
-            out = out.index_copy(dim, idx, self._mix(idx, render_ellipse))
+            out = out.index_copy(dim, idx,
+                                 self.ellipse_renderer.render(sa, sb))
 
         if self.scatter_renderer is not None:
             idx = torch.as_tensor(self.scatter_index,
@@ -420,43 +384,40 @@ class LGNPhospheneSimulator:
                 *lead, len(self.scatter_index), 1)
             w = self.kernel.weights(self._scatter_distance, amp)
             w = w * self._scatter_mask
-
-            def render_scatter(rf, c):
-                weights = w if c is None else w * self._scatter_point_class[
-                    ..., c]
-                h = self.scatter_renderer.bandwidth_deg(
-                    weights, self._scatter_points,
-                    adaptive=self.adaptive_scatter_bandwidth)
-                return self.scatter_renderer.render(weights, _widen(h, rf))
-            out = out.index_copy(dim, idx, self._mix(idx, render_scatter))
+            h = self.scatter_renderer.bandwidth_deg(
+                w, self._scatter_points,
+                adaptive=self.adaptive_scatter_bandwidth)
+            out = out.index_copy(dim, idx,
+                                 self.scatter_renderer.render(w, h))
 
         return out
-
-    def _mix(self, idx: torch.Tensor, render) -> torch.Tensor:
-        """`render(rf_sigma, class_index)` for the electrodes `idx`: once,
-        class-blind, for the 'single' percept; otherwise summed over the
-        classes, weighted by each one's share of the recruited cells."""
-        if not self.classes:
-            return render(None, None)
-        fraction = self.class_fraction.index_select(
-            self._electrode_dimension, idx)
-        rf_sigma = self._rf_sigma.index_select(0, idx)
-        return sum(fraction[..., c, None, None] * render(rf_sigma[:, c], c)
-                   for c in range(len(self.classes)))
 
     def __call__(self, amplitude: torch.Tensor,
                  pulse_width: Optional[torch.Tensor] = None,
                  frequency: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Render one frame of simulated percept."""
+        """Render one frame of simulated percept, (..., H, W)."""
         self.update(amplitude, pulse_width, frequency)
-        return self.unclamped_percept().clamp(0, 1)
+        return self.finish(self.unclamped_percept())
 
     def unclamped_percept(self) -> torch.Tensor:
         """The current percept, summed over electrodes but not clamped,
-        so several nuclei can be added before the clamp."""
+        so several nuclei can be added before `finish`."""
         intensity = self.brightness.get() * self.detection_probability()
-        return torch.sum(intensity * self.spatial_activation(),
-                         dim=self._electrode_dimension)
+        maps = self.spatial_activation()
+        lead, n, image = maps.shape[:-3], maps.shape[-3], maps.shape[-2:]
+        intensity = intensity.reshape(*lead, n)
+        if self._volumes is None:
+            return torch.sum(intensity[..., None, None] * maps,
+                             dim=self._electrode_dimension)
+        # One phosphene per recruited volume.
+        frames = self.merging.percept(
+            intensity.reshape(-1, n), maps.reshape(-1, n, *image),
+            self._volumes)
+        return frames.reshape(*lead, *frames.shape[1:])
+
+    def finish(self, unclamped: torch.Tensor) -> torch.Tensor:
+        """The displayed percept from an unclamped one."""
+        return unclamped.clamp(0, 1)
 
     def detection_probability(self) -> torch.Tensor:
         """Probability that each phosphene is seen, from activation versus
@@ -478,13 +439,10 @@ class LGNPhospheneSimulator:
         floor = torch.sigmoid(self._soft_threshold_slope * -threshold)
         return ((probability - floor)
                 / torch.clamp(1.0 - floor, min=1e-12)).clamp(min=0.0)
-
-    # ------------------------------------------------------------------
     # Stimulus sampling
-    # ------------------------------------------------------------------
     @property
     def phosphene_maps(self) -> torch.Tensor:
-        """Distance from every pixel to each phosphene centre, degrees."""
+        """Distance from every pixel to each phosphene center, degrees."""
         if self._phosphene_maps is None:
             gx, gy = visual_field_grid(self.params, **self.data_kwargs)
             centers = to_tensor(self.array.vf_xy, **self.data_kwargs)
@@ -501,17 +459,26 @@ class LGNPhospheneSimulator:
         return self._phosphene_centers
 
     @property
+    def rf_cell_class(self) -> np.ndarray:
+        """Cell class whose receptive field each electrode samples: the
+        class of the layer at its tip, or the one `sampling.rf_cell_class`
+        names."""
+        sampling = self.params['sampling']
+        if sampling['rf_cell_class'] != 'tip':
+            return np.full(self.array.n_electrodes, sampling['rf_cell_class'])
+        tip = self.array.tip_cell_class
+        return np.where(tip == '', sampling['rf_fallback_class'], tip)
+
+    @property
     def sampling_mask(self) -> torch.Tensor:
         """Which pixels fall inside each electrode's sampling region: the
-        receptive-field centre radius, or the single nearest pixel."""
+        receptive-field center radius, or the single nearest pixel."""
         if self._sampling_mask is None:
             if self._sampling_method == 'receptive_fields':
-                radius = center_radius_deg(
+                radius = center_radius_by_class(
                     self.array.eccentricity_deg, self.params,
-                    require(self.params, 'sampling.rf_cell_class'),
-                    require(self.params, 'sampling.rf_form'))
-                radius = radius * require(self.params,
-                                          'sampling.rf_size_scale')
+                    self.rf_cell_class, self.params['sampling']['rf_form'])
+                radius = radius * self.params['sampling']['rf_size_scale']
                 radius = to_tensor(
                     np.reshape(radius, (-1, 1, 1)), **self.data_kwargs)
                 self._sampling_mask = torch.less(self.phosphene_maps, radius)
@@ -542,14 +509,16 @@ class LGNPhospheneSimulator:
         else:
             out = activation_mask.flatten(-2)[..., self.phosphene_centers]
         if rescale:
-            out = out * require(self.params, 'sampling.stimulus_scale')
+            out = out * self.params['sampling']['stimulus_scale']
         return out
-
-    # ------------------------------------------------------------------
     # Reporting
-    # ------------------------------------------------------------------
     def get_state(self) -> Dict[str, torch.Tensor]:
+        """Tensors of the last frame, plus the configured and effective
+        aggregation modes as strings."""
         return {
+            'aggregation_configured': self.aggregation_configured,
+            'aggregation_effective': self.aggregation.describe(),
+            'equivalent_current_ua': self._last_amplitude_ua,
             'brightness': self.brightness.get(),
             'sigma_major': self.size.sigma_major,
             'sigma_minor': self.size.sigma_minor,
@@ -560,7 +529,6 @@ class LGNPhospheneSimulator:
             'effective_charge_per_second': self.effective_charge_per_second,
             'layer_activation': self.layer_activation,
             'recruited_cells': self.recruited_cells,
-            'class_fraction': self.class_fraction,
         }
 
     def layer_activation_table(self) -> Dict[str, np.ndarray]:
@@ -571,24 +539,11 @@ class LGNPhospheneSimulator:
         return {name: values[..., i]
                 for i, name in enumerate(self.layer_names)}
 
-    def class_fraction_table(self) -> Dict[str, np.ndarray]:
-        """Last frame's share of recruited cells, keyed by percept class."""
-        if self.class_fraction is None:
-            raise RuntimeError("Needs percept.model 'class_mixture' and at "
-                               "least one call of the simulator.")
-        values = to_numpy(self.class_fraction.detach())
-        return {name: values[..., i] for i, name in enumerate(self.classes)}
-
     def describe(self) -> str:
-        """The electrode array's configuration and per-electrode flags."""
-        return self.array.describe()
+        """The electrode array's configuration, per-electrode flags and
+        aggregation mode."""
+        return '\n'.join([
+            self.array.describe(),
+            f"  aggregation       : configured {self.aggregation_configured}"
+            f", effective {self.aggregation.describe()}"])
 
-
-def _widen(sigma: torch.Tensor, extra: Optional[torch.Tensor]
-           ) -> torch.Tensor:
-    """The width of a Gaussian of width `sigma` blurred by one of width
-    `extra`; `sigma` itself when `extra` is None."""
-    if extra is None:
-        return sigma
-    # `tiny` keeps the gradient finite where both widths are zero
-    return torch.sqrt(sigma ** 2 + extra ** 2 + torch.finfo(sigma.dtype).tiny)

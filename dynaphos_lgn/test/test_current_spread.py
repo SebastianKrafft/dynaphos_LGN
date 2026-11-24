@@ -1,6 +1,5 @@
-"""Current spread, recruitment kernels and the multi-electrode bracket."""
+"""Current spread and the recruitment kernel."""
 import copy
-import math
 
 import pytest
 import torch
@@ -15,7 +14,7 @@ def kernel(params, **current_spread_overrides):
     return cs.RecruitmentKernel.from_params(params)
 
 
-K = 675.0   # what config/params_lgn.yaml ships; asserted below
+K = 675.0   # what dynaphos_lgn/config/params_lgn.yaml ships; asserted below
 
 
 class TestStoneyLaw:
@@ -25,7 +24,7 @@ class TestStoneyLaw:
         the one place that pins the two together."""
         assert cs.excitability_constant_ua_per_mm2(lgn_params) == K
 
-    def test_radius_at_the_lgn_behavioural_threshold(self, lgn_params):
+    def test_radius_at_the_lgn_behavioral_threshold(self, lgn_params):
         """40 uA (Pezaris & Reid 2007) under the transplanted V1 K gives
         ~244 um -- the number the multi-electrode spacing argument
         turns on."""
@@ -54,7 +53,7 @@ class TestClassScaling:
                     == cs.excitability_constant_ua_per_mm2(lgn_params))
 
     def test_larger_cells_get_a_smaller_k(self, params_override):
-        """Magnocellular nucleoli are larger (3.00 vs 2.25 um), so a
+        """Magnocellular axons are thicker (2.8 vs 2.0 um), so a
         size-scaled model must make them MORE excitable, i.e. smaller K
         and wider spread."""
         params = params_override(current_spread__class_scaling='diameter')
@@ -68,15 +67,27 @@ class TestClassScaling:
         with pytest.raises(ValueError):
             cs.k_for_cell_class('parvo', params)
 
+    def test_a_list_of_classes_uses_their_mean_diameter(self,
+                                                        params_override):
+        params = params_override(current_spread__class_scaling='diameter')
+        d = params['current_spread']['axon_diameter_um']
+        expected = K * d['parvo'] / ((d['parvo'] + d['magno']) / 2)
+        assert cs.k_for_cell_class(['magno', 'parvo'], params) \
+            == pytest.approx(expected)
+
+    def test_a_class_without_a_diameter_is_rejected(self, params_override):
+        params = params_override(current_spread__class_scaling='diameter')
+        with pytest.raises(KeyError):
+            cs.k_for_cell_class(['parvo', 'konio'], params)
+
 
 class TestRecruitmentKernel:
-    @pytest.mark.parametrize('shape', ['gaussian', 'logistic'])
-    @pytest.mark.parametrize('contour', [0.5, math.exp(-2)])
+    @pytest.mark.parametrize('contour', [0.5, 0.1353352832366127])
     def test_weight_at_the_nominal_radius_equals_the_contour_value(
-            self, lgn_params, shape, contour):
+            self, lgn_params, contour):
         """This anchoring is what stops the size model and the per-layer
         recruitment model from drifting into two different radii."""
-        k = kernel(lgn_params, kernel_shape=shape, contour_value=contour)
+        k = kernel(lgn_params, contour_value=contour)
         i = torch.tensor([[55.0]])
         r = k.radius_mm(i)
         assert float(k.weights(r, i)) == pytest.approx(contour, abs=1e-5)
@@ -98,11 +109,10 @@ class TestRecruitmentKernel:
         w = k.weights(d, torch.tensor([[20.0], [60.0], [180.0]]))
         assert torch.all(torch.diff(w.squeeze()) > 0)
 
-    @pytest.mark.parametrize('shape', ['gaussian', 'logistic'])
-    def test_gradient_flows_to_current_everywhere(self, lgn_params, shape):
+    def test_gradient_flows_to_current_everywhere(self, lgn_params):
         """The reason the kernel must be smooth: a hard in/out test has
-        zero gradient in I, so the optimiser could never move."""
-        k = kernel(lgn_params, kernel_shape=shape)
+        zero gradient in I, so the optimizer could never move."""
+        k = kernel(lgn_params)
         i = torch.tensor([[10.0], [40.0], [200.0]], requires_grad=True)
         d = torch.linspace(0.01, 1.2, 30).unsqueeze(0)
         k.weights(d, i).sum().backward()
@@ -120,41 +130,26 @@ class TestRecruitmentKernel:
         assert float(k.weights(r_eff, torch.tensor([[40.0]]))) \
             == pytest.approx(tail, rel=0.05)
 
-    def test_bosking_saturates_while_stoney_does_not(self, lgn_params):
-        stoney = kernel(lgn_params, spread_model='stoney')
-        bosking = kernel(lgn_params, spread_model='bosking')
-        big = 5000.0
-        ceiling = lgn_params['current_spread']['bosking']['max_diameter_mm']
-        assert float(bosking.radius_mm(big)) < 0.5 * ceiling * 1.001
-        assert float(stoney.radius_mm(big)) > float(bosking.radius_mm(big))
-
     def test_rejects_nonsense_configuration(self, lgn_params):
-        with pytest.raises(ValueError):
-            kernel(lgn_params, kernel_shape='triangular')
         with pytest.raises(ValueError):
             kernel(lgn_params, contour_value=1.0)
 
 
-class TestThresholdBracket:
-    def test_ceiling_is_never_below_the_floor(self, lgn_params):
-        for spacing in (0.05, 0.2, 0.5, 2.0):
-            b = cs.threshold_reduction_bracket(4, spacing, lgn_params)
-            assert b['ceiling_fraction'] >= b['floor_fraction']
+class TestFieldForm:
+    def test_one_electrode_drive_reproduces_the_distance_kernel(
+            self, lgn_params):
+        k = kernel(lgn_params)
+        d = torch.linspace(0.01, 0.6, 50, dtype=torch.float64)
+        current = torch.tensor(60.0, dtype=torch.float64)
+        drive = (k.radius_mm(current) / d) ** 2
+        assert torch.allclose(k.weights_from_drive(drive),
+                              k.weights(d, current), atol=1e-12)
 
-    def test_field_summation_vanishes_at_wide_spacing(self, lgn_params):
-        tight = cs.threshold_reduction_bracket(4, 0.05, lgn_params)
-        wide = cs.threshold_reduction_bracket(4, 2.0, lgn_params)
-        assert tight['ceiling_fraction'] > wide['ceiling_fraction']
-        assert wide['ceiling_fraction'] == pytest.approx(
-            wide['floor_fraction'])
+    def test_scale_current_inverts_the_radius(self, lgn_params):
+        k = kernel(lgn_params)
+        current = torch.tensor([30.0, 60.0], dtype=torch.float64)
+        scaled = k.scale_current(current, torch.tensor(1.2,
+                                                       dtype=torch.float64))
+        assert torch.allclose(k.radius_mm(scaled),
+                              1.2 * k.radius_mm(current), rtol=1e-6)
 
-    def test_regime_follows_spacing_over_radius(self, lgn_params):
-        assert 'high overlap' in cs.threshold_reduction_bracket(
-            4, 0.1, lgn_params)['regime']
-        assert 'low overlap' in cs.threshold_reduction_bracket(
-            4, 1.5, lgn_params)['regime']
-
-    def test_reports_the_geometric_quantity_that_decides_it(self, lgn_params):
-        b = cs.threshold_reduction_bracket(4, 0.4, lgn_params)
-        assert b['spacing_over_radius'] == pytest.approx(
-            0.4 / b['spread_radius_mm'])

@@ -6,7 +6,7 @@ Writes three figures:
    field, by renderer and eccentricity, and phosphene sizes.
 2. ``lgn_demo_percept.png`` -- a rendered percept and the per-lamina
    recruitment behind it.
-3. ``lgn_demo_optimisation.png`` -- gradient descent on per-electrode
+3. ``lgn_demo_optimization.png`` -- gradient descent on per-electrode
    amplitude towards a target percept.
 
 Usage::
@@ -19,19 +19,15 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 from matplotlib import pyplot as plt
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from dynaphos.utils import load_params                              # noqa: E402
-from dynaphos_lgn.build import build_simulator                      # noqa: E402
-from dynaphos_lgn.current_spread import threshold_reduction_bracket # noqa: E402
-from dynaphos_lgn.params import require                             # noqa: E402
+from dynaphos.utils import load_params
+from dynaphos_lgn.build import build_simulator
+from dynaphos_lgn.params import PARAMS_PATH
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -85,7 +81,7 @@ def plot_percept(sim, out_path: Path):
 
     fig, (ax, ax2) = plt.subplots(1, 2, figsize=(11, 5),
                                   gridspec_kw={'width_ratios': [1, 1.15]})
-    half = require(sim.params, 'run.view_angle') / 2
+    half = sim.params['run']['view_angle'] / 2
     ax.imshow(image, cmap='gray', origin='lower', vmin=0, vmax=1,
               extent=[-half, half, -half, half])
     ax.set_xlabel('visual field x (deg)')
@@ -110,7 +106,7 @@ def plot_percept(sim, out_path: Path):
     plt.close(fig)
 
 
-def run_optimisation(sim, out_path: Path, steps: int = 120):
+def run_optimization(sim, out_path: Path, steps: int = 120):
     """Gradient descent on per-electrode amplitude towards a target,
     with the soft threshold so sub-threshold electrodes get a gradient."""
     sim.soft_threshold = True
@@ -121,7 +117,7 @@ def run_optimisation(sim, out_path: Path, steps: int = 120):
     target = sim(target_amplitude).detach()
 
     raw = torch.full((sim.num_phosphenes,), -3.0, requires_grad=True)
-    optimiser = torch.optim.Adam([raw], lr=0.15)
+    optimizer = torch.optim.Adam([raw], lr=0.15)
     scale = 2e-4                              # amperes at raw = 0
 
     losses = []
@@ -129,23 +125,23 @@ def run_optimisation(sim, out_path: Path, steps: int = 120):
         sim.reset()
         amplitude = torch.sigmoid(raw) * scale
         loss = torch.nn.functional.mse_loss(sim(amplitude), target)
-        optimiser.zero_grad()
+        optimizer.zero_grad()
         loss.backward()
-        optimiser.step()
+        optimizer.step()
         losses.append(float(loss.detach()))
 
     sim.reset()
     final = sim(torch.sigmoid(raw).detach() * scale).detach().numpy()
 
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.4))
-    half = require(sim.params, 'run.view_angle') / 2
+    half = sim.params['run']['view_angle'] / 2
     extent = [-half, half, -half, half]
     axes[0].imshow(target.numpy(), cmap='gray', origin='lower', vmin=0,
                    vmax=1, extent=extent)
     axes[0].set_title('target percept')
     axes[1].imshow(final, cmap='gray', origin='lower', vmin=0, vmax=1,
                    extent=extent)
-    axes[1].set_title('after optimisation')
+    axes[1].set_title('after optimization')
     axes[2].semilogy(losses)
     axes[2].set_xlabel('step')
     axes[2].set_ylabel('MSE loss')
@@ -162,7 +158,7 @@ def run_optimisation(sim, out_path: Path, steps: int = 120):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--params',
-                        default=str(REPO / 'config' / 'params_lgn.yaml'))
+                        default=str(PARAMS_PATH))
     parser.add_argument(
         '--atlas-dir',
         default=str(REPO / 'data' / 'Erwin_Atlas'))
@@ -181,7 +177,7 @@ def main():
     params['electrodes']['n_electrodes'] = args.n_electrodes
     params['run']['gpu'] = None
     # Keep the electrodes inside the rendered field of view
-    half = require(params, 'run.view_angle') / 2
+    half = params['run']['view_angle'] / 2
     params['electrodes']['max_eccentricity_deg'] = min(
         params['electrodes'].get('max_eccentricity_deg', half), 0.8 * half)
 
@@ -191,26 +187,13 @@ def main():
     print(simulator.describe())
     print()
 
-    # Only for reporting
-    spacing = 0.4
-    bracket = threshold_reduction_bracket(4, spacing, params)
-    print(f"Multi-electrode threshold reduction at {spacing * 1e3:.0f} um "
-          f"spacing, N = 4:")
-    print(f"  spread radius        : "
-          f"{bracket['spread_radius_mm'] * 1e3:.0f} um")
-    print(f"  spacing / radius     : {bracket['spacing_over_radius']:.2f}")
-    print(f"  threshold reduction  : "
-          f"{bracket['floor_fraction'] * 100:.0f}% - "
-          f"{bracket['ceiling_fraction'] * 100:.0f}%  ({bracket['regime']})")
-    print()
-
     plot_electrodes(simulator, out_dir / 'lgn_demo_electrodes.png')
     plot_percept(simulator, out_dir / 'lgn_demo_percept.png')
-    losses = run_optimisation(simulator,
-                              out_dir / 'lgn_demo_optimisation.png',
+    losses = run_optimization(simulator,
+                              out_dir / 'lgn_demo_optimization.png',
                               steps=args.steps)
 
-    print(f"Optimisation: loss {losses[0]:.3e} -> {losses[-1]:.3e} "
+    print(f"Optimization: loss {losses[0]:.3e} -> {losses[-1]:.3e} "
           f"over {len(losses)} steps.")
     print(f"Figures written to {out_dir}.")
 

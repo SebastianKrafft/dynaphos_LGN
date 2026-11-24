@@ -3,16 +3,19 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dynaphos"
-version = "0.1.3"
+name = "dynaphos-lgn"
+version = "0.1.0"
 authors = [
+  { name="Sebastian Krafft" },
   { name="Maureen van der Grinten", email="maureen.vandergrinten@ru.nl" },
   { name="Jaap de Ruyter", email="jaap.deruyter@donders.ru.nl" },
   { name="Bodo Rueckauer", email="bodo.rueckauer@donders.ru.nl" },
 ]
-description = "Fully differentiable and biologically plausible simulation of prosthetic vision."
+description = "Differentiable phosphene simulation for LGN stimulation, built on Dynaphos."
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.9"
+dependencies = ["numpy", "torch", "scipy", "pyyaml", "opencv-python",
+                "matplotlib"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
@@ -20,22 +23,23 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-# The atlas viewers: dynaphos_lgn.viz3d, .slices and .explore
-viz = ["plotly", "ipywidgets", "anywidget"]
+# The test suite and the reproduction experiments
+test = ["pytest", "pandas"]
 
 [project.urls]
-"Homepage" = "https://github.com/neuralcodinglab/dynaphos.git"
+"Homepage" = "https://github.com/SebastianKrafft/dynaphos_LGN"
+"Dynaphos" = "https://github.com/neuralcodinglab/dynaphos"
 
 [tool.setuptools]
 packages = ["dynaphos", "dynaphos_lgn"]
 
+[tool.setuptools.package-data]
+dynaphos_lgn = ["config/*.yaml"]
+
 [tool.pytest.ini_options]
-# The LGN test suite runs against a synthetic atlas by default, so it
-# needs no separately downloaded data and finishes in seconds. Tests
-# that genuinely need the real Erwin atlas skip themselves when it is
-# absent rather than silently passing.
+# The LGN tests run against a synthetic atlas; tests that need the real
+# Erwin atlas skip themselves when it is absent.
 testpaths = ["dynaphos_lgn/test", "test"]
-filterwarnings = ["ignore::DeprecationWarning"]
 markers = [
     "slow: test takes appreciably longer than the rest of the suite",
 ]

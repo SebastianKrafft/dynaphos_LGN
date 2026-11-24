@@ -6,7 +6,7 @@ runner drives both the V1 `GaussianSimulator` and the
 `LGNPhospheneSimulator`:
 
     v1        dynaphos.GaussianSimulator, config/params.yaml
-    lgn_hard  LGNPhospheneSimulator, config/params_lgn.yaml, hard gate
+    lgn_hard  LGNPhospheneSimulator, dynaphos_lgn/config/params_lgn.yaml, hard gate
     lgn_soft  as lgn_hard, logistic detection probability
 """
 import functools
@@ -22,6 +22,7 @@ from dynaphos.cortex_models import \
     get_visual_field_coordinates_probabilistically
 from dynaphos.simulator import GaussianSimulator
 from dynaphos.utils import load_params
+from dynaphos_lgn.params import PARAMS_PATH
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(__file__).resolve().parent / 'data'
@@ -74,9 +75,30 @@ def get_path(params: dict, path: str):
     return node
 
 
+# Calibrated values. params_lgn.yaml holds the refit for its chronaxie
+# (chronaxie_refit.py); the reproduction runs the LGN model with the V1
+# values and no chronaxie, as the calibration being reproduced had none.
+CALIBRATED = [('thresholding', 'rheobase'),
+              ('thresholding', 'activation_threshold'),
+              ('thresholding', 'activation_threshold_sd'),
+              ('brightness_saturation', 'cps_half'),
+              ('brightness_saturation', 'slope_brightness'),
+              ('temporal_dynamics', 'trace_increase_rate'),
+              ('temporal_dynamics', 'activation_decay_per_second'),
+              ('temporal_dynamics', 'trace_decay_per_second')]
+
+
 def load_config(kind: str) -> dict:
-    name = 'params.yaml' if kind == 'v1' else 'params_lgn.yaml'
-    return load_params(str(ROOT / 'config' / name))
+    """The model's config; the LGN one with the V1 calibration and no
+    chronaxie, as the calibration being reproduced had none."""
+    v1 = load_params(str(ROOT / 'config' / 'params.yaml'))
+    if kind == 'v1':
+        return v1
+    params = load_params(str(PARAMS_PATH))
+    params['default_stim']['chronaxie_s'] = 0.0
+    for section, key in CALIBRATED:
+        params[section][key] = v1[section][key]
+    return params
 
 
 @functools.lru_cache(maxsize=None)

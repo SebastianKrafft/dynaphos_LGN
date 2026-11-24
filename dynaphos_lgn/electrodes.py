@@ -1,12 +1,10 @@
 """Setup-time electrode geometry for the LGN simulator.
 
-Voxel lookup, the candidate neighbourhood, per-candidate layer and
+Voxel lookup, the candidate neighborhood, per-candidate layer and
 position, the local magnification and the render flags are computed
 once here. The forward pass only weights these fixed arrays by a smooth
 function of the current.
 """
-from __future__ import annotations
-
 import logging
 from dataclasses import dataclass
 from typing import Mapping, Optional, Sequence, Tuple
@@ -16,17 +14,17 @@ import numpy as np
 from dynaphos.utils import Map
 from dynaphos_lgn.atlas import hemifield_of
 from dynaphos_lgn.current_spread import RecruitmentKernel
+from dynaphos_lgn.lgn_utils import get_electrode_layout
 from dynaphos_lgn.magnification import (JacobianMagnification,
-                                        LocalMagnification, MagnificationModel,
+                                        LocalMagnification,
                                         isotropic_construction_radius_deg)
-from dynaphos_lgn.params import require
 
 
 def layer_names(params: Mapping, present=None) -> dict:
     """{code: name} from `atlas.layers.names`, optionally only for the
     codes in `present`."""
     return {int(code): name for code, name
-            in require(params, 'atlas.layers.names').items()
+            in params['atlas']['layers']['names'].items()
             if present is None or int(code) in present}
 
 
@@ -34,15 +32,15 @@ def layer_names(params: Mapping, present=None) -> dict:
 class ElectrodeFlags:
     """Per-electrode flags.
 
-    :ivar central_isotropic: Inside the atlas's isotropic centre.
-    :ivar unreliable_beyond_neighborhood: The centre Jacobian should not
+    :ivar central_isotropic: Inside the atlas's isotropic center.
+    :ivar unreliable_beyond_neighborhood: The center Jacobian should not
         be extrapolated across the footprint; rendered by scatter.
-    :ivar touches_placeholder: The candidate neighbourhood includes
+    :ivar touches_placeholder: The candidate neighborhood includes
         placeholder or ipsilateral-sentinel voxels.
-    :ivar class_heterogeneous: The neighbourhood spans more than one
+    :ivar class_heterogeneous: The neighborhood spans more than one
         cell class.
-    :ivar scalar_magnification: Sized by a table/scalar model rather than
-        the per-voxel Jacobian.
+    :ivar scalar_magnification: No Jacobian at the electrode; sized by
+        the inclination-averaged magnification at its eccentricity.
     """
 
     central_isotropic: np.ndarray
@@ -60,13 +58,13 @@ class ElectrodeFlags:
         n = len(self.central_isotropic)
         rows = [('central-1 deg, isotropic by construction',
                  self.central_isotropic),
-                ('Jacobian unreliable beyond its fit neighbourhood',
+                ('Jacobian unreliable beyond its fit neighborhood',
                  self.unreliable_beyond_neighborhood),
                 ('footprint touches placeholder/sentinel voxels',
                  self.touches_placeholder),
                 ('footprint spans more than one cell class',
                  self.class_heterogeneous),
-                ('sized by scalar magnification (forced circular)',
+                ('sized by the eccentricity table, not the Jacobian',
                  self.scalar_magnification)]
         lines = [f"Electrode confidence flags ({n} electrodes):"]
         for label, mask in rows:
@@ -74,43 +72,69 @@ class ElectrodeFlags:
         return '\n'.join(lines)
 
 
+def cloud_bandwidth_deg(points: np.ndarray, center: np.ndarray,
+                        extent_percentile: float) -> float:
+    """Splat bandwidth that hides a point cloud's lattice, degrees.
+
+    :param points: (n, 2) visual-field positions of one cloud.
+    :param center: (2,) the electrode's own position.
+    :param extent_percentile: Percentile of distance from `center` that
+        counts as the cloud's extent.
+    """
+    if len(points) < 2:
+        return 0.0
+    sub = points if len(points) <= 256 else points[
+        np.linspace(0, len(points) - 1, 256).astype(int)]
+    d = np.linalg.norm(sub[:, None, :] - sub[None, :, :], axis=-1)
+    np.fill_diagonal(d, np.inf)
+    nearest = np.min(d, axis=1)
+    # The atlas's quantization makes distinct voxels share a retinotopic
+    # position, so drop the zero-spacing pairs.
+    nearest = nearest[np.isfinite(nearest) & (nearest > 0)]
+    nn_spacing = float(np.median(nearest)) if nearest.size else 0.0
+
+    # Nearest-neighbor spacing alone leaves lattice artifacts, so also
+    # compare against a uniform cloud of the same count and area.
+    extent = float(np.percentile(np.linalg.norm(points - center, axis=-1),
+                                 extent_percentile))
+    uniform_spacing = (np.sqrt(np.pi * extent ** 2 / len(points))
+                       if extent > 0 else 0.0)
+    return max(nn_spacing, uniform_spacing)
+
+
 class LGNElectrodeArray:
     """A fixed set of LGN electrodes, with everything precomputed.
 
-    The candidate neighbourhood is sized for `electrodes.max_current_ua`,
+    The candidate neighborhood is sized for `electrodes.max_current_ua`,
     so the array is valid for any current up to it. The hemisphere is
     taken from the atlas.
 
     :param atlas: A built `ErwinAtlas` (or `MirroredAtlas`).
     :param voxel_indices: (n_electrodes, 3) integer (ml, dv, ap) indices.
     :param kernel: The `RecruitmentKernel` used at runtime; it also sizes
-        the neighbourhood.
-    :param jacobian_atlas: Computed/loaded `JacobianAtlas`. If absent,
-        `magnification_model` must be given.
-    :param magnification_model: Used where the Jacobian is missing, or
-        for every electrode when there is no Jacobian atlas.
+        the neighborhood.
+    :param jacobian_atlas: Computed/loaded `JacobianAtlas`.
     :param rng: Used only for the scatter subsample.
     """
 
     def __init__(self, atlas, params: Mapping, voxel_indices: np.ndarray,
                  kernel: Optional[RecruitmentKernel] = None,
                  jacobian_atlas=None,
-                 magnification_model: Optional[MagnificationModel] = None,
                  rng: Optional[np.random.Generator] = None):
         self.atlas = atlas
         self.params = params
         self.kernel = kernel or RecruitmentKernel.from_params(params)
         self.max_current_ua = float(
-            require(params, 'electrodes.max_current_ua'))
+            params['electrodes']['max_current_ua'])
         self.rng = np.random.default_rng() if rng is None else rng
-        self.exclude_ipsi_flat_inclination = require(
-            params, 'atlas.exclude_ipsi_flat_inclination')
-        tail_weight = require(params, 'current_spread.tail_weight')
-        max_candidate_voxels = require(params,
-                                       'electrodes.max_candidate_voxels')
-        n_scatter_points = require(params, 'electrodes.n_scatter_points')
+        self.exclude_ipsi_flat_inclination = params['atlas'][
+            'exclude_ipsi_flat_inclination']
+        tail_weight = params['current_spread']['tail_weight']
+        max_candidate_voxels = params['electrodes'][
+            'max_candidate_voxels']
+        n_scatter_points = params['electrodes']['n_scatter_points']
 
-        self.hemisphere = getattr(atlas, 'hemisphere', 'left')
+        self.hemisphere = atlas.hemisphere
 
         self.voxel_indices = np.asarray(voxel_indices, dtype=int)
         if self.voxel_indices.ndim != 2 or self.voxel_indices.shape[1] != 3:
@@ -121,13 +145,11 @@ class LGNElectrodeArray:
         self._resolve_positions()
         self._build_candidate_neighborhood(tail_weight, max_candidate_voxels)
         self._gather_candidate_properties()
-        self._resolve_magnification(jacobian_atlas, magnification_model)
+        self._resolve_magnification(jacobian_atlas)
         self._select_scatter_points(n_scatter_points)
         self._precompute_scatter_bandwidth()
 
-    # ------------------------------------------------------------------
     # Constructors
-    # ------------------------------------------------------------------
     @classmethod
     def spread_in_visual_field(cls, atlas, params: Mapping,
                                rng: Optional[np.random.Generator] = None,
@@ -137,21 +159,18 @@ class LGNElectrodeArray:
 
         :param n_electrodes: Defaults to `electrodes.n_electrodes`.
         """
-        from dynaphos_lgn.lgn_utils import get_electrode_layout
         rng = np.random.default_rng() if rng is None else rng
         if n_electrodes is None:
-            n_electrodes = require(params, 'electrodes.n_electrodes')
+            n_electrodes = params['electrodes']['n_electrodes']
         _, voxels = get_electrode_layout(
             atlas, n_electrodes,
-            cell_class=require(params, 'electrodes.cell_class'),
-            min_eccentricity=require(params,
-                                     'electrodes.min_eccentricity_deg'),
-            max_eccentricity=require(params,
-                                     'electrodes.max_eccentricity_deg'),
-            bin_size_deg=require(params, 'electrodes.bin_size_deg'),
-            exclude_ipsi_flat_inclination=require(
-                params, 'atlas.exclude_ipsi_flat_inclination'),
-            depth_selection=require(params, 'electrodes.depth_selection'),
+            cell_class=params['electrodes']['cell_class'],
+            min_eccentricity=params['electrodes']['min_eccentricity_deg'],
+            max_eccentricity=params['electrodes']['max_eccentricity_deg'],
+            bin_size_deg=params['electrodes']['bin_size_deg'],
+            exclude_ipsi_flat_inclination=params['atlas'][
+                'exclude_ipsi_flat_inclination'],
+            depth_selection=params['electrodes']['depth_selection'],
             rng=rng)
         return cls(atlas, params, voxels, rng=rng, **kwargs)
 
@@ -165,8 +184,8 @@ class LGNElectrodeArray:
         ecc = np.atleast_1d(np.asarray(eccentricity_deg, dtype=float))
         incl = np.atleast_1d(np.asarray(inclination_deg, dtype=float))
         valid = atlas.eligible(
-            require(params, 'electrodes.cell_class'),
-            require(params, 'atlas.exclude_ipsi_flat_inclination'))
+            params['electrodes']['cell_class'],
+            params['atlas']['exclude_ipsi_flat_inclination'])
         idx = np.argwhere(valid)
         vx = atlas.eccentricity_deg[valid] * np.cos(
             np.deg2rad(atlas.inclination_deg[valid]))
@@ -185,12 +204,10 @@ class LGNElectrodeArray:
         array.position_error_deg = errors
         return array
 
-    # ------------------------------------------------------------------
     # Setup steps
-    # ------------------------------------------------------------------
     def _resolve_positions(self):
         """Look up each electrode's retinotopic position, with a small
-        neighbourhood fallback where it lands on a placeholder voxel."""
+        neighborhood fallback where it lands on a placeholder voxel."""
         atlas = self.atlas
         idx = tuple(self.voxel_indices.T)
         ecc = np.asarray(atlas.eccentricity_deg[idx], dtype=float).copy()
@@ -201,7 +218,7 @@ class LGNElectrodeArray:
         n_bad = int(self.fell_on_placeholder.sum())
         if n_bad:
             logging.info("%d of %d electrodes landed on a placeholder voxel; "
-                         "falling back to a local neighbourhood average.",
+                         "falling back to a local neighborhood average.",
                          n_bad, self.n_electrodes)
             for i in np.flatnonzero(self.fell_on_placeholder):
                 mean = self._neighborhood_position(self.voxel_indices[i])
@@ -220,8 +237,7 @@ class LGNElectrodeArray:
         `electrodes.position_fallback_radius_vox`, averaged in Cartesian
         coordinates to avoid the +-180 deg wrap."""
         atlas = self.atlas
-        radius = require(self.params,
-                         'electrodes.position_fallback_radius_vox')
+        radius = self.params['electrodes']['position_fallback_radius_vox']
         lo = np.maximum(voxel - radius, 0)
         hi = np.minimum(voxel + radius + 1, atlas.atlas_shape)
         sl = tuple(slice(a, b) for a, b in zip(lo, hi))
@@ -240,7 +256,7 @@ class LGNElectrodeArray:
         stride keeps the count within `electrodes.max_candidate_voxels`;
         `voxels_per_candidate` records what each candidate stands for.
         """
-        voxel_size = self.atlas._voxel_size_mm
+        voxel_size = self.atlas.voxel_size_mm
         self.max_radius_mm = float(self.kernel.effective_radius_mm(
             self.max_current_ua, tail_weight))
         self.nominal_radius_mm = float(
@@ -269,7 +285,7 @@ class LGNElectrodeArray:
         self.candidate_offsets_mm = offsets_mm[keep]
         self.candidate_distance_mm = distance_mm[keep]
         self.n_candidates = int(keep.sum())
-        logging.info("Candidate neighbourhood: %d voxels per electrode "
+        logging.info("Candidate neighborhood: %d voxels per electrode "
                      "(stride %d, radius %.3f mm at I_max = %.1f uA).",
                      self.n_candidates, stride, self.max_radius_mm,
                      self.max_current_ua)
@@ -293,6 +309,11 @@ class LGNElectrodeArray:
             valid &= ~sentinel
         else:
             self.candidate_is_sentinel = np.zeros_like(valid)
+        # Placeholder: a labeled layer, but no retinotopy.
+        self.candidate_is_placeholder = in_bounds & (
+            atlas.layer[flat].reshape(in_bounds.shape)
+            != atlas.missing_layer) & ~atlas.valid[flat].reshape(
+            in_bounds.shape)
 
         layer = atlas.layer[flat].reshape(in_bounds.shape).astype(np.int8)
         layer = np.where(valid, layer, 0)
@@ -321,43 +342,49 @@ class LGNElectrodeArray:
             layer[..., None] == self.layer_ids[None, None, :]).astype(
             np.float32)
 
-        classes = require(self.params, 'atlas.layers.classes')
+        classes = self.params['atlas']['layers']['classes']
         self.touches_class = {name: np.isin(layer, codes).any(axis=1)
                               for name, codes in classes.items()}
+        self.tip_cell_class = self._nearest_cell_class(layer)
 
-    def _resolve_magnification(self, jacobian_atlas, magnification_model):
-        """Local magnification at each electrode centre, plus flags."""
+    def _nearest_cell_class(self, layer: np.ndarray) -> np.ndarray:
+        """Receptive-field cell class at each tip: that of the nearest
+        candidate voxel in a class, '' when the neighborhood has none."""
+        classes = self.params['atlas']['layers']['classes']
+        names = [''] + list(self.params['receptive_fields']['cell_classes'])
+        index = np.zeros(layer.shape, dtype=int)
+        for i, name in enumerate(names[1:], start=1):
+            index[np.isin(layer, classes[name])] = i
+        distance = np.where(index > 0, self.candidate_distance_mm, np.inf)
+        nearest = np.argmin(distance, axis=1)
+        return np.array(names)[index[np.arange(len(layer)), nearest]]
+
+    def _resolve_magnification(self, jacobian_atlas):
+        """Local magnification at each electrode center, plus flags.
+
+        Electrodes without a Jacobian take the inclination-averaged
+        magnification at their eccentricity. Anything still missing is
+        reported by `LGNSize` and renders at zero size.
+        """
+        if jacobian_atlas is None:
+            raise ValueError("LGNElectrodeArray needs a jacobian_atlas.")
         self.jacobian_atlas = jacobian_atlas
-        scalar_fallback = np.zeros(self.n_electrodes, dtype=bool)
+        self.magnification_model = JacobianMagnification(
+            jacobian_atlas, self.params, self.atlas)
+        local = self.magnification_model.at_voxels(self.voxel_indices)
+        missing = ~local.valid | ~np.isfinite(local.major_deg_per_mm)
 
-        if jacobian_atlas is not None:
-            self.magnification_model = JacobianMagnification(
-                jacobian_atlas, self.params, self.atlas)
-            local = self.magnification_model.at_voxels(self.voxel_indices)
-            missing = ~local.valid | ~np.isfinite(local.major_deg_per_mm)
-        elif magnification_model is not None:
-            self.magnification_model = magnification_model
-            local = magnification_model.at_eccentricity(
-                self.eccentricity_deg, inclination_deg=self.inclination_deg)
-            missing = ~local.valid
-            scalar_fallback[:] = True
-        else:
-            raise ValueError("Provide either jacobian_atlas or "
-                             "magnification_model.")
-
-        # Fill Jacobian gaps from the model. Anything still missing is
-        # reported by LGNSize and renders at zero size.
-        if (magnification_model is not None and jacobian_atlas is not None
-                and missing.any()):
-            fallback = magnification_model.at_eccentricity(
-                self.eccentricity_deg, inclination_deg=self.inclination_deg)
+        if missing.any():
+            cell_class = self.params['electrodes']['cell_class']
+            fallback = self.magnification_model.at_eccentricity(
+                self.eccentricity_deg,
+                cell_class if isinstance(cell_class, str) else 'parvo')
             for attr in ('major_deg_per_mm', 'minor_deg_per_mm',
                          'orientation_rad'):
                 setattr(local, attr,
                         np.where(missing, getattr(fallback, attr),
                                  getattr(local, attr)))
             local.valid = local.valid | fallback.valid
-            scalar_fallback |= missing
 
         self.local_magnification: LocalMagnification = local
         self.flags = ElectrodeFlags(
@@ -368,10 +395,11 @@ class LGNElectrodeArray:
             unreliable_beyond_neighborhood=np.asarray(
                 local.unreliable_beyond_neighborhood, dtype=bool),
             touches_placeholder=np.any(
-                ~self.candidate_valid, axis=1),
+                self.candidate_is_sentinel | self.candidate_is_placeholder,
+                axis=1),
             class_heterogeneous=np.sum(list(self.touches_class.values()),
                                        axis=0) > 1,
-            scalar_magnification=scalar_fallback)
+            scalar_magnification=missing)
 
     def _select_scatter_points(self, n_scatter_points: int):
         """Subsample candidates for scatter rendering, by distance rank
@@ -388,43 +416,19 @@ class LGNElectrodeArray:
         cloud's own spacing."""
         pts = self.candidate_vf_xy[:, self.scatter_index, :]
         valid = self.candidate_valid[:, self.scatter_index]
-        bandwidth = np.zeros(self.n_electrodes)
-        for i in range(self.n_electrodes):
-            # Masked-out candidates sit at the electrode centre;
-            # including them would drive the median spacing to zero.
-            p = pts[i][valid[i]]
-            if len(p) < 2:
-                continue
-            sub = p if len(p) <= 256 else p[
-                np.linspace(0, len(p) - 1, 256).astype(int)]
-            d = np.linalg.norm(sub[:, None, :] - sub[None, :, :], axis=-1)
-            np.fill_diagonal(d, np.inf)
-            nearest = np.min(d, axis=1)
-            # The atlas's quantisation makes distinct voxels share a
-            # retinotopic position, so drop the zero-spacing pairs.
-            nearest = nearest[np.isfinite(nearest) & (nearest > 0)]
-            nn_spacing = float(np.median(nearest)) if nearest.size else 0.0
+        percentile = self.params['rendering']['scatter_extent_percentile']
+        # Masked-out candidates sit at the electrode center; including
+        # them would drive the median spacing to zero.
+        self.scatter_bandwidth_floor_deg = np.array([
+            cloud_bandwidth_deg(pts[i][valid[i]], self.vf_xy[i], percentile)
+            for i in range(self.n_electrodes)])
 
-            # Nearest-neighbour spacing alone leaves lattice artefacts, so
-            # also compare against a uniform cloud of the same count and
-            # area.
-            extent = float(np.percentile(
-                np.linalg.norm(p - self.vf_xy[i], axis=-1),
-                require(self.params,
-                        'rendering.scatter_extent_percentile')))
-            uniform_spacing = (np.sqrt(np.pi * extent ** 2 / len(p))
-                               if extent > 0 else 0.0)
-            bandwidth[i] = max(nn_spacing, uniform_spacing)
-        self.scatter_bandwidth_floor_deg = bandwidth
-
-    # ------------------------------------------------------------------
     # Derived views
-    # ------------------------------------------------------------------
     @property
     def render_mode(self) -> np.ndarray:
-        """'scatter' where the centre Jacobian should not be extrapolated
+        """'scatter' where the center Jacobian should not be extrapolated
         across the footprint, 'ellipse' otherwise (always 'ellipse' in
-        the isotropic centre)."""
+        the isotropic center)."""
         mode = np.where(self.flags.unreliable_beyond_neighborhood,
                         'scatter', 'ellipse')
         mode = np.where(self.flags.central_isotropic, 'ellipse', mode)
@@ -449,7 +453,7 @@ class LGNElectrodeArray:
             (n_electrodes, n_layers, n_bins), ``cells`` (same shape,
             weighted by cells per voxel and by `voxels_per_candidate`).
         """
-        n_bins = require(self.params, 'recruitment.distance_histogram_bins')
+        n_bins = self.params['recruitment']['distance_histogram_bins']
         edges = np.linspace(0.0, self.max_radius_mm, n_bins + 1)
         centers = 0.5 * (edges[:-1] + edges[1:])
         which = np.clip(np.digitize(self.candidate_distance_mm, edges) - 1,
@@ -504,10 +508,8 @@ class LGNElectrodeArray:
                 continue
             radius[i] = float(np.percentile(
                 np.linalg.norm(p - self.vf_xy[i], axis=-1),
-                require(self.params,
-                        'rendering.scatter_patch_radius_percentile')))
-        return radius * require(self.params,
-                                'rendering.scatter_patch_radius_margin')
+                self.params['rendering']['scatter_patch_radius_percentile']))
+        return radius * self.params['rendering']['scatter_patch_radius_margin']
 
     def per_layer_cell_counts(self) -> np.ndarray:
         """(n_electrodes, n_layers) reachable cells at maximum current."""

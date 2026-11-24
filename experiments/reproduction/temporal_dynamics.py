@@ -102,7 +102,7 @@ def fast_peaks(trace_decay_per_second: float, trace_increase_rate: float,
 
 def refit(data: pd.DataFrame, params: dict):
     """(trace_decay_per_second, trace_increase_rate, r2) fitted to the
-    Schmidt means, as in the original notebook (peaks normalised)."""
+    Schmidt means, as in the original notebook (peaks normalized)."""
     def model(_, decay, increase):
         peaks = fast_peaks(decay, increase, params)
         return peaks / peaks.max()

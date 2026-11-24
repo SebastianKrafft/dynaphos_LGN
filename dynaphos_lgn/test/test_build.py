@@ -3,8 +3,13 @@ import numpy as np
 import pytest
 import torch
 
-from dynaphos_lgn.build import (build_atlas, build_kernel,
-                                build_magnification_model, build_simulator)
+from dynaphos.utils import load_params
+from dynaphos_lgn.build import (build_atlas, build_simulator,
+                                n_electrodes_for)
+from dynaphos_lgn.current_spread import RecruitmentKernel
+from dynaphos_lgn.params import PARAMS_PATH
+
+from .conftest import REAL_ATLAS_DIR, requires_real_atlas
 
 
 class TestBuild:
@@ -14,51 +19,18 @@ class TestBuild:
             atlas__directory=str(tmp_path / 'nowhere'),
             synthetic_atlas__shape_ml_dv_ap=(32, 32, 48))
         atlas = build_atlas(params)
-        assert getattr(atlas, 'is_synthetic', False)
+        assert atlas.is_synthetic
         assert any('synthetic' in r.message for r in caplog.records)
 
     def test_kernel_reflects_the_configured_constants(self, lgn_params):
-        kernel = build_kernel(lgn_params)
-        assert kernel.k == lgn_params['current_spread'][
-            'k_ua_per_mm2']
-        assert kernel.shape == lgn_params['current_spread']['kernel_shape']
+        kernel = RecruitmentKernel.from_params(lgn_params)
+        assert kernel.k == lgn_params['current_spread']['k_ua_per_mm2']
+        assert kernel.contour_value == lgn_params['current_spread'][
+            'contour_value']
 
-    @pytest.mark.parametrize('choice', ['jacobian', 'atlas_gradient',
-                                        'malpeli_density'])
-    def test_every_magnification_model_builds_and_answers(
-            self, params_override, synthetic_atlas, synthetic_jacobian,
-            choice):
-        params = params_override(magnification__model=choice)
-        model = build_magnification_model(params, synthetic_atlas,
-                                          synthetic_jacobian)
-        local = model.at_eccentricity(np.array([2.0, 8.0]))
-        assert np.all(local.major_deg_per_mm > 0)
-
-    def test_unknown_magnification_model_is_rejected(
-            self, params_override, synthetic_atlas, synthetic_jacobian):
-        params = params_override(magnification__model='vibes')
-        with pytest.raises(ValueError):
-            build_magnification_model(params, synthetic_atlas,
-                                      synthetic_jacobian)
-
-    @pytest.mark.parametrize('choice', ['atlas_gradient', 'anisotropic_gradient',
-                                        'malpeli_density'])
-    def test_non_jacobian_model_actually_sizes_the_electrodes(
-            self, params_override, choice):
-        """A non-'jacobian' `magnification.model` must drive sizing, not
-        just get built and discarded."""
-        params = params_override(magnification__model=choice,
-                                 electrodes__n_electrodes=6,
-                                 synthetic_atlas__shape_ml_dv_ap=(32, 32, 64))
-        sim, parts = build_simulator(params, synthetic=True)
-        array = parts['electrode_array']
-        assert array.jacobian_atlas is None
-        assert array.flags.scalar_magnification.all()
-
-    def test_jacobian_model_still_uses_the_per_voxel_jacobian(
+    def test_electrodes_are_sized_by_the_per_voxel_jacobian(
             self, params_override):
-        params = params_override(magnification__model='jacobian',
-                                 electrodes__n_electrodes=6,
+        params = params_override(electrodes__n_electrodes=6,
                                  synthetic_atlas__shape_ml_dv_ap=(32, 32, 64))
         sim, parts = build_simulator(params, synthetic=True)
         array = parts['electrode_array']
@@ -75,7 +47,7 @@ class TestBuild:
         img = sim(torch.full((sim.num_phosphenes,), 70e-6))
         assert torch.isfinite(img).all()
 
-    def test_explicit_voxel_indices_are_honoured(self, lgn_params,
+    def test_explicit_voxel_indices_are_honored(self, lgn_params,
                                                  synthetic_atlas):
         params = lgn_params
         chosen = np.argwhere(synthetic_atlas.valid)[::9000][:3]
@@ -93,3 +65,69 @@ class TestBuild:
         assert sim.out_of_view.any()
         assert any('outside the rendered' in r.message
                    for r in caplog.records)
+
+
+@requires_real_atlas
+def test_shipped_config_builds_the_configured_electrodes():
+    """The shipped config, untouched, on the real atlas."""
+    params = load_params(str(PARAMS_PATH))
+    params['run']['gpu'] = None
+    sim, parts = build_simulator(params, atlas_dir=REAL_ATLAS_DIR)
+    for name, part in parts['hemispheres'].items():
+        assert (part['electrode_array'].n_electrodes
+                == n_electrodes_for(params, name))
+    img = sim(torch.full((sim.num_phosphenes,), 60e-6))
+    assert torch.isfinite(img).all()
+
+
+class TestFoveola:
+    """The foveola file's loader and the placeholder rule, on the
+    synthetic atlas: the checks need only a grid and its eccentricity."""
+
+    @staticmethod
+    def write(path, rows, bom=True):
+        text = '\r\n'.join('\t'.join(str(v) for v in row) for row in rows)
+        path.write_text(('﻿' if bom else '') + text, encoding='utf-8')
+
+    def test_reads_the_supplied_format(self, synthetic_atlas, tmp_path):
+        """Tab-separated, CRLF, with a UTF-8 byte-order mark."""
+        rows = synthetic_atlas.foveola_column[:3]
+        self.write(tmp_path / 'foveola.dat', rows)
+        assert np.array_equal(
+            synthetic_atlas.load_foveola_column(tmp_path), rows)
+
+    def test_missing_file_gives_none_loudly(self, synthetic_atlas, tmp_path,
+                                            caplog):
+        assert synthetic_atlas.load_foveola_column(tmp_path) is None
+        assert any('foveola' in r.message for r in caplog.records)
+
+    def test_refuses_a_voxel_off_the_fovea(self, synthetic_atlas, tmp_path):
+        off = np.argwhere(synthetic_atlas.valid
+                          & (synthetic_atlas.eccentricity > 0))[:1]
+        self.write(tmp_path / 'foveola.dat', off)
+        with pytest.raises(ValueError, match='zero eccentricity'):
+            synthetic_atlas.load_foveola_column(tmp_path)
+
+    def test_refuses_a_voxel_outside_the_grid(self, synthetic_atlas,
+                                              tmp_path):
+        self.write(tmp_path / 'foveola.dat',
+                   [synthetic_atlas.atlas_shape])
+        with pytest.raises(ValueError, match='inside the grid'):
+            synthetic_atlas.load_foveola_column(tmp_path)
+
+    def test_placeholder_moves_off_zero_eccentricity_only(self,
+                                                          params_override):
+        from dynaphos_lgn.synthetic_atlas import SyntheticAtlas
+        atlas = SyntheticAtlas(params_override(
+            synthetic_atlas__shape_ml_dv_ap=(24, 24, 40)))
+        flat = atlas.ipsi_sentinel_values[1] * atlas.incl_scale
+        fovea = tuple(atlas.foveola_column[:2].T)
+        elsewhere = tuple(np.argwhere(atlas.valid
+                                      & (atlas.eccentricity > 0))[:1].T)
+        atlas.inclination[fovea] = [-flat, flat]
+        atlas.inclination[elsewhere] = flat
+
+        atlas.clear_foveal_placeholder()
+        assert list(atlas.inclination[fovea]) == [-90 * atlas.incl_scale,
+                                                  90 * atlas.incl_scale]
+        assert atlas.inclination[elsewhere] == flat

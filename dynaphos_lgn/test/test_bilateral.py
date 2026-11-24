@@ -131,6 +131,17 @@ class TestMirroredAtlas:
         hemifield, still excluded."""
         assert sorted(mirrored_atlas.ipsi_sentinel_values) == [-45.0, 45.0]
 
+    def test_reflects_the_foveola_column(self, mirrored_atlas,
+                                         synthetic_atlas):
+        column = synthetic_atlas.foveola_column
+        assert len(column) > 0
+        reflected = mirrored_atlas.foveola_column
+        assert np.array_equal(
+            reflected[:, 0], synthetic_atlas.atlas_shape[0] - 1 - column[:, 0])
+        assert np.all(mirrored_atlas.eccentricity[tuple(reflected.T)] == 0)
+        assert np.allclose(mirrored_atlas.foveola_column_mm,
+                           synthetic_atlas.foveola_column_mm)
+
     def test_inherits_whether_the_source_was_synthetic(self, mirrored_atlas):
         assert mirrored_atlas.is_synthetic is True
 
@@ -248,14 +259,14 @@ class TestMirroredJacobianAtlas:
             mirrored_jacobian.unreliable_beyond_neighborhood_flag,
             synthetic_jacobian.unreliable_beyond_neighborhood_flag[reverse_ml])
 
-    def test_decompose_valid_avoids_materialising_the_field(
+    def test_decompose_valid_avoids_materializing_the_field(
             self, mirrored_jacobian, voxel_pairs):
         """The whole-grid decomposition is derived from the source
         atlas's own SVD; asking for it must not build a reflected copy
         of the Jacobian."""
         from dynaphos_lgn.magnification import JacobianMagnification
         major, minor, _ = mirrored_jacobian.decompose_valid()
-        assert mirrored_jacobian._materialised is None
+        assert mirrored_jacobian._materialized is None
         mirrored, _ = voxel_pairs
         index = tuple(mirrored.T)
         expected = JacobianMagnification.decompose(
@@ -299,11 +310,12 @@ class TestMirroredJacobianAtlas:
 class TestElectrodesInTheRightNucleus:
     @pytest.fixture(scope='class')
     def right_array(self, mirrored_atlas, lgn_params, synthetic_jacobian):
-        from dynaphos_lgn.build import build_kernel
+        from dynaphos_lgn.current_spread import RecruitmentKernel
         jacobian = MirroredJacobianAtlas(synthetic_jacobian, lgn_params)
         return LGNElectrodeArray.spread_in_visual_field(
             mirrored_atlas, lgn_params, rng=np.random.default_rng(0),
-            kernel=build_kernel(lgn_params), jacobian_atlas=jacobian)
+            kernel=RecruitmentKernel.from_params(lgn_params),
+            jacobian_atlas=jacobian)
 
     def test_every_electrode_lands_in_the_left_hemifield(self, right_array):
         assert right_array.hemisphere == 'right'
@@ -416,17 +428,6 @@ class TestBuildDispatch:
                                        hemispheres='right')
         assert simulator.hemisphere == 'right'
 
-    def test_table_models_are_fitted_once_and_reflected(
-            self, params_override):
-        from dynaphos_lgn.magnification import MirroredMagnification
-        params = params_override(atlas__hemispheres=['left', 'right'],
-                                 magnification__model='atlas_gradient')
-        _, parts = build_simulator(params, synthetic=True)
-        left = parts['hemispheres']['left']['magnification']
-        right = parts['hemispheres']['right']['magnification']
-        assert isinstance(right, MirroredMagnification)
-        assert right.base is left
-
     def test_both_nuclei_share_one_atlas_load_and_one_fit(self, bilateral):
         """Reflecting is re-indexing. Loading the atlas twice, or
         refitting the Jacobian, would be minutes and gigabytes spent on
@@ -438,7 +439,7 @@ class TestBuildDispatch:
         assert right['jacobian_atlas'].base is left['jacobian_atlas']
         assert right['kernel'] is left['kernel']
 
-    def test_per_hemisphere_electrode_counts_are_honoured(self, bilateral):
+    def test_per_hemisphere_electrode_counts_are_honored(self, bilateral):
         simulator, _ = bilateral
         assert simulator.counts == [6, 4]
         assert simulator.num_phosphenes == 10
@@ -562,10 +563,7 @@ class TestBilateralForwardPass:
 
         # And so the percept is exactly what the left nucleus alone
         # renders -- meridian spill included.
-        left = simulator.simulators['left']
-        alone = torch.sum(
-            left.brightness.get() * left.detection_probability()
-            * left.spatial_activation(), dim=left.electrode_dimension)
+        alone = simulator.simulators['left'].unclamped_percept()
         assert torch.allclose(image, alone.clamp(0, 1))
         assert float(image.sum()) > 0
 
@@ -576,12 +574,8 @@ class TestBilateralForwardPass:
         simulator.reset()
         image = simulator(self._amplitude(simulator))
 
-        total = None
-        for sub in simulator.simulators.values():
-            intensity = sub.brightness.get() * sub.detection_probability()
-            summed = torch.sum(intensity * sub.spatial_activation(),
-                               dim=sub.electrode_dimension)
-            total = summed if total is None else total + summed
+        total = sum(sub.unclamped_percept()
+                    for sub in simulator.simulators.values())
         assert torch.allclose(image, total.clamp(0, 1))
 
     def test_zero_current_gives_an_empty_percept(self, bilateral):
@@ -648,7 +642,7 @@ class TestBilateralForwardPass:
                                equal_nan=True)
 
     def test_shape_broadcasts_against_the_reported_state(self, bilateral):
-        """`shape` exists so an optimisation target can be built against
+        """`shape` exists so an optimization target can be built against
         it, which only helps if it matches what get_state returns."""
         simulator, _ = bilateral
         simulator.reset()

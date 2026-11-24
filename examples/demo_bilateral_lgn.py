@@ -17,17 +17,14 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 
 import numpy as np
 from matplotlib import pyplot as plt
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from dynaphos.utils import load_params                              # noqa: E402
-from dynaphos_lgn.build import build_simulator                      # noqa: E402
-from dynaphos_lgn.params import require                             # noqa: E402
+from dynaphos.utils import load_params
+from dynaphos_lgn.build import build_simulator
+from dynaphos_lgn.params import PARAMS_PATH
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -35,9 +32,9 @@ REPO = Path(__file__).resolve().parents[1]
 def target_image(params) -> np.ndarray:
     """Two thick rings and a horizontal bar straddling the vertical
     meridian, on the simulator's own pixel grid."""
-    res_x, res_y = require(params, 'run.resolution')
-    x_origin, y_origin = require(params, 'run.origin')
-    half = require(params, 'run.view_angle') / 2
+    res_x, res_y = params['run']['resolution']
+    x_origin, y_origin = params['run']['origin']
+    half = params['run']['view_angle'] / 2
     x = np.linspace(x_origin - half, x_origin + half, res_x)
     y = np.linspace(y_origin - half, y_origin + half, res_y)
     grid_x, grid_y = np.meshgrid(x, y)
@@ -66,16 +63,16 @@ def banner(parts) -> str:
 
 
 def plot(bilateral, image, out_path: Path, params, parts):
-    half = require(params, 'run.view_angle') / 2
+    half = params['run']['view_angle'] / 2
     extent = [-half, half, -half, half]
 
     fig, axes = plt.subplots(1, 4, figsize=(19, 5.4))
 
     ax = axes[0]
-    colours = {'left': 'tab:blue', 'right': 'tab:red'}
+    colors = {'left': 'tab:blue', 'right': 'tab:red'}
     for name, span in bilateral.electrode_slices.items():
         xy = bilateral.vf_xy[span]
-        ax.scatter(xy[:, 0], xy[:, 1], c=colours[name], s=45,
+        ax.scatter(xy[:, 0], xy[:, 1], c=colors[name], s=45,
                    edgecolor='k', linewidth=0.5,
                    label=f'{name} LGN ({span.stop - span.start})')
     ax.axvline(0, color='0.6', lw=1.0, ls='--')
@@ -110,7 +107,7 @@ def main():
         description=__doc__.split('\n\n')[0],
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--params',
-                        default=str(REPO / 'config' / 'params_lgn.yaml'))
+                        default=str(PARAMS_PATH))
     parser.add_argument('--atlas-dir', default=None)
     parser.add_argument('--synthetic', action='store_true',
                         help='force the synthetic stand-in atlas')

@@ -8,8 +8,8 @@ simulators. Each experiment runs three ways:
 | kind       | simulator                                   | config                    |
 |------------|---------------------------------------------|---------------------------|
 | `v1`       | `dynaphos.GaussianSimulator` (unmodified)   | `config/params.yaml`      |
-| `lgn_hard` | `dynaphos_lgn.LGNPhospheneSimulator`, step  | `config/params_lgn.yaml`  |
-| `lgn_soft` | same, logistic detection probability        | `config/params_lgn.yaml`  |
+| `lgn_hard` | `dynaphos_lgn.LGNPhospheneSimulator`, step  | `dynaphos_lgn/config/params_lgn.yaml`  |
+| `lgn_soft` | same, logistic detection probability        | `dynaphos_lgn/config/params_lgn.yaml`  |
 
 Conditions run in parallel along the batch dimension with one electrode,
 so spatial parameters play no part; only the temporal model, brightness
@@ -115,7 +115,7 @@ Slope sweep (multiples of 1/sd, spread / calibrated sd):
   weakly constrained by the Schmidt data.
 * **Rheobase.** The config's 23.9 uA is the paper's value, fitted on
   Fernandez et al. (2021). The notebook's own charge-duration fit on the
-  digitised thresholds gives 22.37 uA; with that value the psychometric
+  digitized thresholds gives 22.37 uA; with that value the psychometric
   R^2 is 0.875 (vs 0.868) and mu is 5% higher. Kept for reference only.
 * **Frame rate.** The fits ran at 256-1000 fps, the simulator usually at
   35 fps. Trains last `int(duration * fps)` frames and the activation is
@@ -145,9 +145,9 @@ Slope sweep (multiples of 1/sd, spread / calibrated sd):
   Fig. 2 activation peaks (about 3e-7) and the resting brightness of
   0.117 = S(-lambda A50) only fit the code values. kappa = 14.0 in the
   text is `trace_increase_rate` (13.955).
-* The charge axis in the paper's Fig. 3 is labelled uC; it is nC.
+* The charge axis in the paper's Fig. 3 is labeled uC; it is nC.
 * `Fernandez_2021_fig6A.csv` came with the original repository's first
-  commit and is normalised to 1.0 at 90 uA; how it was digitised is not
-  recorded. The brightness fit depends on that normalisation.
+  commit and is normalized to 1.0 at 90 uA; how it was digitized is not
+  recorded. The brightness fit depends on that normalization.
 * `PAPER_*` constants in `common.py` record the values the original fits
   ran with where they differ from the config.

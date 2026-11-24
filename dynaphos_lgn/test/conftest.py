@@ -1,9 +1,8 @@
 """Shared fixtures.
 
-Every test in this package runs against the synthetic atlas by default,
-so the suite needs no 145 MB download and finishes in seconds. The tests
-that genuinely need the real atlas skip themselves when it is absent --
-and say so, rather than silently passing.
+Tests run against the synthetic atlas, so the suite needs no atlas
+download. Tests that need the real atlas skip themselves when it is
+absent.
 """
 import copy
 from pathlib import Path
@@ -12,6 +11,7 @@ import numpy as np
 import pytest
 
 from dynaphos.utils import load_params
+from dynaphos_lgn.params import PARAMS_PATH
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REAL_ATLAS_DIR = REPO_ROOT / 'data' / 'Erwin_Atlas'
@@ -32,7 +32,7 @@ def lgn_params():
     value must deep-copy rather than mutate, or it will leak into every
     test that runs after it. `params_override` does that for you.
     """
-    params = load_params(str(REPO_ROOT / 'config' / 'params_lgn.yaml'))
+    params = load_params(str(PARAMS_PATH))
     params['run']['resolution'] = [96, 96]
     params['run']['gpu'] = None
     params['electrodes']['n_electrodes'] = 8
@@ -65,7 +65,7 @@ def real_atlas(lgn_params):
     if not REAL_ATLAS_AVAILABLE:
         pytest.skip(f"Real Erwin atlas not found in {REAL_ATLAS_DIR}.")
     from dynaphos_lgn.atlas import ErwinAtlas
-    return ErwinAtlas(lgn_params).build_atlas(REAL_ATLAS_DIR)
+    return ErwinAtlas(lgn_params).read(REAL_ATLAS_DIR)
 
 
 @pytest.fixture(scope='session')
@@ -83,14 +83,12 @@ def synthetic_jacobian(synthetic_atlas, lgn_params):
 @pytest.fixture
 def built(lgn_params, synthetic_atlas, synthetic_jacobian):
     """A small simulator on the synthetic atlas."""
-    from dynaphos_lgn.build import (build_electrode_array, build_kernel,
-                                    build_magnification_model)
+    from dynaphos_lgn.build import build_electrode_array
+    from dynaphos_lgn.current_spread import RecruitmentKernel
     from dynaphos_lgn.simulator import LGNPhospheneSimulator
     rng = np.random.default_rng(0)
-    kernel = build_kernel(lgn_params)
+    kernel = RecruitmentKernel.from_params(lgn_params)
     array = build_electrode_array(lgn_params, synthetic_atlas,
                                   synthetic_jacobian, kernel, rng)
-    array.magnification_model = build_magnification_model(
-        lgn_params, synthetic_atlas, synthetic_jacobian)
     sim = LGNPhospheneSimulator(lgn_params, array, rng=rng)
     return sim, array

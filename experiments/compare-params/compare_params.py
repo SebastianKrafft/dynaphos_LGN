@@ -1,5 +1,5 @@
 """Compare LGN parameter sets on the same electrodes and images, under
-optimised stimulation.
+optimized stimulation.
 
 Every condition in CONDITIONS is a set of config overrides on one base
 config, built with the same `run.seed`, so only the parameter under test
@@ -9,11 +9,12 @@ simulator, bounded to [0, `default_stim.safety_limit_ua`]:
 
     loss   MSE between percept (before the [0, 1] clamp) and image, both
            blurred to ANALYSIS_BLUR_DEG and pooled to the analysis grid
-    start  rheobase + START_FRACTION of the way to the safety limit; below
-           the rheobase there is no gradient
-    final  amplitudes below the rheobase are set to zero
+    start  activation current + START_FRACTION of the way to the safety
+           limit; below it there is no gradient. The activation current
+           is rheobase * (1 + chronaxie / pw_default), as in the simulator
+    final  amplitudes below the activation current are set to zero
 
-A hard threshold is optimised against its logistic surrogate and then
+A hard threshold is optimized against its logistic surrogate and then
 rendered with the hard gate.
 
 Metrics
@@ -23,13 +24,13 @@ Metrics
   sigma_deg_100ua     minor), degrees
   digit_acc           MNIST accuracy of a CNN trained on clean digits and
                       tested on the percepts
-  fit_loss            optimiser's final loss on the test digits
+  fit_loss            optimizer's final loss on the test digits
   bars_contrast_*     (on - off) / (on + off) per band of the bars image
   e_discrim           1 - mean pairwise correlation of the four tumbling-E
                       percepts
   pearson_r, ssim,    percept vs image, averaged over bars, E and shapes
   mse_norm
-  frac_active         fraction of electrodes above the rheobase
+  frac_active         fraction of electrodes above the activation current
   current_active_ua   mean current of those electrodes
   frac_at_limit       fraction at >= 99% of the safety limit
 
@@ -49,7 +50,7 @@ Usage::
     python experiments/compare-params/compare_params.py --resume          # after a stop
 
 MNIST is read from data/MNIST/ (pass --download to fetch it).
-`sampling.*` has no effect here: the optimiser chooses the amplitudes.
+`sampling.*` has no effect here: the optimizer chooses the amplitudes.
 """
 from __future__ import annotations
 
@@ -69,19 +70,17 @@ import numpy as np
 import pandas as pd
 
 # The simulator turns on torch's deterministic mode, which on CUDA
-# refuses cuBLAS matmuls unless this is set before CUDA initialises.
+# refuses cuBLAS matmuls unless this is set before CUDA initializes.
 os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
-import torch                                                        # noqa: E402
+import torch
 import torch.nn.functional as F
 from torch import nn
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from dynaphos.utils import load_params, set_deterministic           # noqa: E402
-from dynaphos_lgn.build import build_simulator                      # noqa: E402
-from dynaphos_lgn.params import require                             # noqa: E402
-from dynaphos_lgn.simulator import LGNPhospheneSimulator            # noqa: E402
-from make_test_image import (BAR_BANDS, X_MAX, X_MIN,              # noqa: E402
+from dynaphos.utils import load_params, set_deterministic
+from dynaphos_lgn.build import build_simulator
+from dynaphos_lgn.simulator import LGNPhospheneSimulator
+from dynaphos_lgn.params import PARAMS_PATH
+from make_test_image import (BAR_BANDS, X_MAX, X_MIN,
                              coordinate_grid, pattern_bars, pattern_e,
                              pattern_shapes)
 
@@ -98,11 +97,11 @@ MNIST_FILES = {'train_images': 'train-images-idx3-ubyte.gz',
                'test_labels': 't10k-labels-idx1-ubyte.gz'}
 
 # Where the digit sits: a 28 px MNIST frame scaled to DIGIT_DEG and
-# centred here, inside the wedge one left LGN covers. The digit itself
+# centered here, inside the wedge one left LGN covers. The digit itself
 # fills the central ~20 px, so its strokes land around 0.4-0.5 deg wide
 # -- near the array's resolution limit, where parameters matter most.
 DIGIT_CENTER_DEG = (3.25, 0.0)
-E_CENTER_DEG = (3.1, 0.0)     # centre of make_test_image's E
+E_CENTER_DEG = (3.1, 0.0)     # center of make_test_image's E
 
 # Analysis scale. Percepts and images are blurred by ANALYSIS_BLUR_DEG
 # before being compared, and pooled to ANALYSIS_PIXEL_DEG for the loss,
@@ -113,19 +112,20 @@ ANALYSIS_PIXEL_DEG = 0.25
 SSIM_WINDOW_SIGMA_PX = 1.5
 CHANCE = 0.1
 
-# Where the optimiser starts, as a fraction of the way from the rheobase
-# to the safety limit (~31 uA for 100 uA). Measured on MNIST: starting
-# at the rheobase or below leaves electrodes stuck without gradient, and
-# starting at half the limit converges more slowly to a worse fit.
+# Where the optimizer starts, as a fraction of the way from the activation
+# current to the safety limit (~57 uA for 52 uA and 100 uA). Measured on
+# MNIST: starting at the threshold or below leaves electrodes stuck
+# without gradient, and starting at half the limit converges more slowly
+# to a worse fit.
 START_FRACTION = 0.1
 
 # Reading off a detection threshold.
 THRESHOLD_SWEEP_UA = np.arange(1.0, 201.0, 1.0)
 
-# Colours (dataviz reference palette, light mode).
+# Colors (dataviz reference palette, light mode).
 INK, INK_SECONDARY, SERIES, SURFACE = '#0b0b0b', '#52514e', '#2a78d6', \
     '#fcfcfb'
-REFERENCE_GREY = '#8f8e89'
+REFERENCE_GRAY = '#8f8e89'
 
 
 # -------------------------------------------------------------------------
@@ -133,7 +133,7 @@ REFERENCE_GREY = '#8f8e89'
 # -------------------------------------------------------------------------
 def base_params(args) -> dict:
     """The shipped LGN config, with the settings every condition shares."""
-    params = load_params(str(REPO / 'config' / 'params_lgn.yaml'))
+    params = load_params(str(PARAMS_PATH))
     params['run']['gpu'] = (None if args.device.type == 'cpu'
                             else args.device.index or 0)
     params['run']['batch_size'] = 0
@@ -148,11 +148,11 @@ def base_params(args) -> dict:
 def apply_overrides(params: dict, overrides: dict) -> dict:
     params = copy.deepcopy(params)
     for path, value in overrides.items():
-        require(params, path)                # the key must already exist
         *parents, leaf = path.split('.')
         node = params
         for key in parents:
             node = node[key]
+        node[leaf]                           # the key must already exist
         node[leaf] = value
     return params
 
@@ -302,7 +302,7 @@ def test_images(X, Y, device=None) -> dict:
 
 
 # -------------------------------------------------------------------------
-# Optimised stimulation
+# Optimized stimulation
 # -------------------------------------------------------------------------
 def threshold_draws(simulator, repeats: int) -> list:
     """One per-electrode threshold tensor per repeat, seeded by index, so
@@ -319,7 +319,7 @@ class Stimulator:
     """Finds, per image, the amplitudes whose percept best matches it.
 
     Runs on its own batched copy of the simulator, sharing the electrode
-    array, so `batch` images are optimised side by side. Adam scales
+    array, so `batch` images are optimized side by side. Adam scales
     every amplitude's step separately, so images in one batch do not
     influence each other.
     """
@@ -328,16 +328,19 @@ class Stimulator:
         self.sim = LGNPhospheneSimulator(
             apply_overrides(params, {'run.batch_size': args.batch}),
             simulator.array, rng=np.random.default_rng(0))
-        self.unit = require(params, 'run.current_unit_to_ua')
+        self.unit = params['run']['current_unit_to_ua']
         self.limit = self.sim.safety_limit_ua / self.unit
-        self.rheobase = require(params, 'thresholding.rheobase')
-        if self.limit <= self.rheobase:
+        # The simulator's current threshold at the default pulse width.
+        self.activation = params['thresholding']['rheobase'] * (
+            1 + params['default_stim']['chronaxie_s']
+            / params['default_stim']['pw_default'])
+        if self.limit <= self.activation:
             sys.exit(f"default_stim.safety_limit_ua "
                      f"({self.sim.safety_limit_ua} uA) is at or below the "
-                     f"rheobase ({self.rheobase * self.unit} uA): no "
-                     f"permitted current delivers any charge.")
-        self.start = (self.rheobase
-                      + START_FRACTION * (self.limit - self.rheobase))
+                     f"activation current ({self.activation * self.unit} "
+                     f"uA): no permitted current delivers any charge.")
+        self.start = (self.activation
+                      + START_FRACTION * (self.limit - self.activation))
         self.grid = grid
         self.mask = grid.mask.to(torch.float32)
         self.batch, self.steps, self.lr = args.batch, args.steps, args.lr
@@ -360,11 +363,11 @@ class Stimulator:
     def __call__(self, images: torch.Tensor, threshold: torch.Tensor):
         """(N, H, W) images -> (clamped percepts (N, H, W), amplitudes in
         uA (N, n), final loss (N,))."""
-        parts = [self._optimise(part, threshold)
+        parts = [self._optimize(part, threshold)
                  for part in images.split(self.batch)]
         return tuple(torch.cat(p) for p in zip(*parts))
 
-    def _optimise(self, images: torch.Tensor, threshold: torch.Tensor):
+    def _optimize(self, images: torch.Tensor, threshold: torch.Tensor):
         n_images = len(images)
         if n_images < self.batch:        # the batched simulator's size is
             images = torch.cat([images, images[-1:].expand(   # fixed: pad
@@ -375,22 +378,22 @@ class Stimulator:
 
         hard = not sim.soft_threshold
         baseline = sim.soft_threshold_baseline
-        if hard:                         # optimise the logistic surrogate
+        if hard:                         # optimize the logistic surrogate
             sim.soft_threshold, sim.soft_threshold_baseline = True, 'none'
         z = torch.full((self.batch, sim.num_phosphenes),
                        self.start / self.limit, **sim.data_kwargs)
         z = torch.logit(z).requires_grad_(True)
-        optimiser = torch.optim.Adam([z], lr=self.lr)
+        optimizer = torch.optim.Adam([z], lr=self.lr)
         for _ in range(self.steps):
-            optimiser.zero_grad()
+            optimizer.zero_grad()
             amplitude = self.limit * torch.sigmoid(z)
             self.loss(self.percept(amplitude), wanted).sum().backward()
-            optimiser.step()
+            optimizer.step()
         sim.soft_threshold, sim.soft_threshold_baseline = not hard, baseline
 
         with torch.no_grad():
             amplitude = self.limit * torch.sigmoid(z)
-            amplitude = torch.where(amplitude > self.rheobase, amplitude,
+            amplitude = torch.where(amplitude > self.activation, amplitude,
                                     torch.zeros_like(amplitude))
             percept = self.percept(amplitude).clamp(0, 1)
             loss = self.loss(percept, wanted)
@@ -472,14 +475,14 @@ def pearson(a: torch.Tensor, b: torch.Tensor, mask) -> float:
     return float((a * b).sum() / denom) if denom > 0 else float('nan')
 
 
-def max_normalised(x: torch.Tensor, mask) -> torch.Tensor:
+def max_normalized(x: torch.Tensor, mask) -> torch.Tensor:
     peak = x[mask].max()
     return x / peak if peak > 0 else torch.zeros_like(x)
 
 
 def ssim(a: torch.Tensor, b: torch.Tensor, mask) -> float:
-    """Mean SSIM inside `mask`, on max-normalised images (L = 1)."""
-    a, b = max_normalised(a, mask), max_normalised(b, mask)
+    """Mean SSIM inside `mask`, on max-normalized images (L = 1)."""
+    a, b = max_normalized(a, mask), max_normalized(b, mask)
     c1, c2 = 0.01 ** 2, 0.03 ** 2
 
     def local(x):
@@ -495,7 +498,7 @@ def ssim(a: torch.Tensor, b: torch.Tensor, mask) -> float:
 
 
 def mse_norm(a, b, mask) -> float:
-    a, b = max_normalised(a, mask), max_normalised(b, mask)
+    a, b = max_normalized(a, mask), max_normalized(b, mask)
     return float(((a - b)[mask] ** 2).mean())
 
 
@@ -551,7 +554,7 @@ def stimulation_metrics(amplitudes_ua: torch.Tensor, limit_ua: float
 @torch.no_grad()
 def benchmark_metrics(simulator, params, thresholds) -> list:
     """One dict per threshold draw."""
-    unit = require(params, 'run.current_unit_to_ua')
+    unit = params['run']['current_unit_to_ua']
     ones = torch.ones(simulator.num_phosphenes, **simulator.data_kwargs)
     activations = []
     for current in THRESHOLD_SWEEP_UA:
@@ -564,7 +567,7 @@ def benchmark_metrics(simulator, params, thresholds) -> list:
         major[current], minor[current] = \
             simulator.array.phosphene_sigma_deg(current)
 
-    mean_ua, sd_ua = require(params, 'benchmarks.pezaris_2007.threshold_ua')
+    mean_ua, sd_ua = params['benchmarks']['pezaris_2007']['threshold_ua']
     out = []
     for threshold in thresholds:
         simulator.threshold.state = threshold
@@ -606,9 +609,9 @@ def crossing(x: np.ndarray, p: np.ndarray, level: float) -> np.ndarray:
 # -------------------------------------------------------------------------
 # Digit classifier
 # -------------------------------------------------------------------------
-def standardise(images: torch.Tensor) -> torch.Tensor:
+def standardize(images: torch.Tensor) -> torch.Tensor:
     """Per image: zero mean, unit sd. Removes overall brightness, which
-    a viewer adapts to and the optimiser does not control freely."""
+    a viewer adapts to and the optimizer does not control freely."""
     flat = images.flatten(1)
     flat = ((flat - flat.mean(1, keepdim=True))
             / flat.std(1, keepdim=True).clamp(min=1e-6))
@@ -649,25 +652,25 @@ def classifiers_for(data, args, checkpoints) -> list:
 def train_classifier(x_train, y_train, seed, epochs) -> SmallCNN:
     """A CNN on clean digits only; it never sees a percept."""
     torch.manual_seed(seed)
-    x_train = standardise(x_train)
+    x_train = standardize(x_train)
     model = SmallCNN(*x_train.shape[-2:]).to(x_train.device)
-    optimiser = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     generator = torch.Generator().manual_seed(seed)
     model.train()
     for _ in range(epochs):
         order = torch.randperm(len(x_train), generator=generator).to(
             x_train.device)
         for batch in order.split(64):
-            optimiser.zero_grad()
+            optimizer.zero_grad()
             F.cross_entropy(model(x_train[batch]), y_train[batch]).backward()
-            optimiser.step()
+            optimizer.step()
     model.eval()
     return model
 
 
 @torch.no_grad()
 def accuracy(model, images, labels) -> float:
-    return float((model(standardise(images)).argmax(1) == labels)
+    return float((model(standardize(images)).argmax(1) == labels)
                  .float().mean())
 
 
@@ -696,7 +699,7 @@ def run_condition(name, params, data, images, classifiers, grid, X, Y, args,
 
     if missing:
         simulator, _ = build_simulator(
-            params, atlas_dir=str(REPO / require(params, 'atlas.directory')))
+            params, atlas_dir=str(REPO / params['atlas']['directory']))
         stimulator = Stimulator(simulator, params, grid, args)
         thresholds = threshold_draws(simulator, args.repeats)
         check_batched(simulator, stimulator, thresholds[0])
@@ -763,7 +766,7 @@ SUMMARY_PANELS = [
     ('e_discrim', 'Tumbling-E discriminability'),
     ('bars_contrast_1.2deg', 'Bar contrast, 1.2 deg band'),
     ('bars_contrast_0.6deg', 'Bar contrast, 0.6 deg band'),
-    ('fit_loss', 'Optimiser loss on digits (lower is better)'),
+    ('fit_loss', 'Optimizer loss on digits (lower is better)'),
     ('current_active_ua', 'Mean current of active electrodes (uA)'),
     ('threshold_ua', 'Detection threshold (uA)'),
     ('sigma_deg_100ua', 'Phosphene sigma at 100 uA (deg)'),
@@ -786,19 +789,19 @@ def plot_summary(summary: pd.DataFrame, path: Path, limit_ua: float):
         sd = np.nan_to_num(summary.loc[conditions, (metric, 'sd')]
                            .to_numpy(float))
         if metric == 'threshold_ua':
-            ax.axvspan(40 - 12, 40 + 12, color=REFERENCE_GREY, alpha=0.18,
+            ax.axvspan(40 - 12, 40 + 12, color=REFERENCE_GRAY, alpha=0.18,
                        lw=0)
             ax.text(40, y.max() + 0.6, 'Pezaris & Reid 40 ± 12',
                     color=INK_SECONDARY, fontsize=7, ha='center')
         if metric == 'current_active_ua':
-            ax.axvline(limit_ua, color=REFERENCE_GREY, lw=1, ls=':')
+            ax.axvline(limit_ua, color=REFERENCE_GRAY, lw=1, ls=':')
             ax.text(limit_ua, y.max() + 0.6, 'safety limit',
                     color=INK_SECONDARY, fontsize=7, ha='right')
         if metric == 'digit_acc':
-            ax.axvline(CHANCE, color=REFERENCE_GREY, lw=1, ls=':')
+            ax.axvline(CHANCE, color=REFERENCE_GRAY, lw=1, ls=':')
             if 'ideal_input' in summary.index:
                 ceiling = summary.loc['ideal_input', (metric, 'mean')]
-                ax.axvline(ceiling, color=REFERENCE_GREY, lw=1, ls=':')
+                ax.axvline(ceiling, color=REFERENCE_GRAY, lw=1, ls=':')
                 ax.text(ceiling, y.max() + 0.6, 'clean digits',
                         color=INK_SECONDARY, fontsize=7, ha='right')
         if 'baseline' in conditions:
@@ -815,7 +818,7 @@ def plot_summary(summary: pd.DataFrame, path: Path, limit_ua: float):
         for side in ('left', 'bottom'):
             ax.spines[side].set_color('#c9c8c3')
     axes[0, 0].set_yticks(y, conditions)
-    fig.suptitle('Parameter comparison under optimised stimulation: mean ± '
+    fig.suptitle('Parameter comparison under optimized stimulation: mean ± '
                  'sd over threshold draws (dashed = baseline, dotted = '
                  'chance / ceiling / limit)',
                  fontsize=10, color=INK, x=0.01, ha='left')
@@ -829,7 +832,7 @@ def plot_examples(examples: dict, images: dict, digit, params, path: Path):
     matplotlib.use('Agg')
     from matplotlib import pyplot as plt
 
-    half = require(params, 'run.view_angle') / 2
+    half = params['run']['view_angle'] / 2
     extent = [-half, half, -half, half]
     columns = [('digit', 'MNIST digit'), ('bars', 'bars'),
                ('e0', 'tumbling E'), ('shapes', 'shapes')]
@@ -853,7 +856,7 @@ def plot_examples(examples: dict, images: dict, digit, params, path: Path):
 
 
 # -------------------------------------------------------------------------
-def summarise(raw: pd.DataFrame) -> pd.DataFrame:
+def summarize(raw: pd.DataFrame) -> pd.DataFrame:
     metrics = [c for c in raw.columns if c not in ('condition', 'repeat')]
     numeric = raw[['condition'] + metrics].copy()
     numeric[metrics] = numeric[metrics].astype(float)
@@ -871,17 +874,17 @@ def main(argv=None):
     parser.add_argument('--n-train', type=int, default=10000,
                         help='clean digits the classifier is trained on')
     parser.add_argument('--n-test', type=int, default=500,
-                        help='test digits, each optimised per repeat')
+                        help='test digits, each optimized per repeat')
     parser.add_argument('--repeats', type=int, default=3,
                         help='threshold draws (and classifier seeds) per '
                              'condition')
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--steps', type=int, default=60,
-                        help='optimiser steps per image')
+                        help='optimizer steps per image')
     parser.add_argument('--lr', type=float, default=0.2,
                         help='Adam learning rate on the amplitude logits')
     parser.add_argument('--batch', type=int, default=16,
-                        help='images optimised side by side (GPU memory: '
+                        help='images optimized side by side (GPU memory: '
                              '~2.8 GB at 16)')
     parser.add_argument('--n-electrodes', type=int, default=100)
     parser.add_argument('--max-ecc', type=float, default=6.0)
@@ -958,7 +961,7 @@ def main(argv=None):
     checkpoints = Checkpoints(out / 'checkpoints', run_config, args.resume,
                               args.fresh)
 
-    limit_ua = require(base, 'default_stim.safety_limit_ua')
+    limit_ua = base['default_stim']['safety_limit_ua']
     print(f"{len(names)} conditions, {args.n_test} test digits, "
           f"{args.repeats} repeats, {args.steps} steps, safety limit "
           f"{limit_ua:g} uA, on {args.device}")
@@ -980,7 +983,7 @@ def main(argv=None):
     raw['condition'] = pd.Categorical(raw['condition'], order, ordered=True)
     raw = raw.sort_values(['condition', 'repeat'])
     raw.to_csv(out / 'metrics_raw.csv', index=False)
-    summary = summarise(raw.astype({'condition': str}))
+    summary = summarize(raw.astype({'condition': str}))
     summary = summary.loc[order]
     summary.to_csv(out / 'metrics.csv')
     plot_summary(summary, out / 'summary.png', limit_ua)

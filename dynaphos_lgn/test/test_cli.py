@@ -2,9 +2,8 @@
 import numpy as np
 import pytest
 
-from dynaphos_lgn import build
+from dynaphos_lgn import build, report
 from dynaphos_lgn.atlas import JacobianAtlas
-from dynaphos_lgn.params import require
 
 
 @pytest.fixture(scope='module')
@@ -46,7 +45,7 @@ def fake_atlas_dir(tmp_path_factory, full_scale_params):
 
 class TestFileSizeCheck:
     def test_correct_sizes_pass(self, fake_atlas_dir, full_scale_params):
-        text = build.check_atlas_files(fake_atlas_dir, full_scale_params)
+        text = report.check_atlas_files(fake_atlas_dir, full_scale_params)
         assert 'MISMATCH' not in text
         assert 'MISSING' not in text
 
@@ -63,12 +62,12 @@ class TestFileSizeCheck:
         # repo assumes, and confirm the mismatch is reported.
         raw = np.fromfile(tmp_path / 'LAYERS.DAT', dtype=np.int8)
         raw.astype(np.int16).tofile(tmp_path / 'LAYERS.DAT')
-        text = build.check_atlas_files(tmp_path, full_scale_params)
+        text = report.check_atlas_files(tmp_path, full_scale_params)
         assert 'MISMATCH' in text
         assert 'bytes/voxel' in text
 
     def test_missing_files_are_named(self, tmp_path, full_scale_params):
-        text = build.check_atlas_files(tmp_path, full_scale_params)
+        text = report.check_atlas_files(tmp_path, full_scale_params)
         assert text.count('MISSING') == len(
             build.atlas_file_specs(full_scale_params))
 
@@ -109,8 +108,7 @@ class TestEndToEnd:
                            str(fake_atlas_dir), '--quiet',
                            '--report', str(tmp_path / 'report.txt')])
         assert code == 0
-        cache = fake_atlas_dir / require(full_scale_params,
-                                         'atlas.jacobian_cache')
+        cache = fake_atlas_dir / full_scale_params['atlas']['jacobian_cache']
         assert cache.exists()
 
         loaded = JacobianAtlas.load(cache, full_scale_params)
@@ -135,13 +133,13 @@ class TestEndToEnd:
 class TestReports:
     def test_atlas_report_flags_a_synthetic_atlas(self, synthetic_atlas,
                                                   lgn_params):
-        text = build.atlas_report(synthetic_atlas, lgn_params)
+        text = report.atlas_report(synthetic_atlas, lgn_params)
         assert 'SYNTHETIC' in text
 
     def test_jacobian_report_bins_by_eccentricity(self, synthetic_atlas,
                                                   synthetic_jacobian,
                                                   lgn_params):
-        text = build.jacobian_report(synthetic_jacobian, synthetic_atlas,
+        text = report.jacobian_report(synthetic_jacobian, synthetic_atlas,
                                      lgn_params)
         assert 'sigma1' in text and 'aniso' in text
         assert 'unreliable' in text
@@ -153,10 +151,10 @@ class TestReports:
         """The report samples for speed, so the sample has to be
         faithful: a sampled median that drifted would misreport the
         magnification field while looking authoritative."""
-        sampled = build.jacobian_report(
+        sampled = report.jacobian_report(
             synthetic_jacobian, synthetic_atlas,
             params_override(validation__jacobian_report_sample_size=50_000))
-        exact = build.jacobian_report(
+        exact = report.jacobian_report(
             synthetic_jacobian, synthetic_atlas,
             params_override(validation__jacobian_report_sample_size=(
                 int(synthetic_jacobian.jacobian_valid.sum()) + 1)))
@@ -178,7 +176,7 @@ class TestReports:
 
     def test_decompose_valid_matches_a_full_decomposition(
             self, synthetic_jacobian, params_override):
-        """The chunked, valid-only SVD is a memory optimisation, so it
+        """The chunked, valid-only SVD is a memory optimization, so it
         has to be numerically identical to the thing it replaces."""
         from dynaphos_lgn.magnification import JacobianMagnification
         # Well under the valid-voxel count, so several chunks actually

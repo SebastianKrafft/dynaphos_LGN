@@ -1,8 +1,9 @@
 """Bit-identical outputs against a stored reference.
 
 The reference holds the outputs of a small, seeded, CPU-only run on the
-synthetic atlas. Any change to the default model shows up here; when a
-change is intended, regenerate it with
+synthetic atlas, under independent aggregation and under field
+superposition. Any change to the model shows up here; when a change is
+intended, regenerate it with
 
     python -m dynaphos_lgn.test.test_regression
 """
@@ -14,6 +15,7 @@ import numpy as np
 import torch
 
 from dynaphos.utils import load_params
+from dynaphos_lgn.params import PARAMS_PATH
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = Path(__file__).parent / 'data' / 'regression_reference.npz'
@@ -27,9 +29,10 @@ STATE_KEYS = ('brightness', 'activation', 'threshold', 'detection_probability')
 RF_ECCENTRICITIES = np.linspace(0.0, 20.0, 9)
 
 
-def small_params(cell_class, soft_threshold, hemispheres) -> dict:
+def small_params(cell_class, soft_threshold, hemispheres,
+                 aggregation='independent') -> dict:
     """The shipped config, shrunk as in conftest, with one case applied."""
-    params = load_params(str(REPO_ROOT / 'config' / 'params_lgn.yaml'))
+    params = load_params(str(PARAMS_PATH))
     params['run']['resolution'] = [64, 64]
     params['run']['gpu'] = None
     params['electrodes']['n_electrodes'] = 8
@@ -40,6 +43,7 @@ def small_params(cell_class, soft_threshold, hemispheres) -> dict:
     params['electrodes']['cell_class'] = cell_class
     params['thresholding']['soft_threshold'] = soft_threshold
     params['atlas']['hemispheres'] = hemispheres
+    params['aggregation']['mode'] = aggregation
     return params
 
 
@@ -54,9 +58,14 @@ def simulator_outputs(params) -> dict:
     from dynaphos_lgn.build import build_simulator
     torch.manual_seed(0)
     sim, _ = build_simulator(copy.deepcopy(params), synthetic=True)
-    # Offset by 40 uA (the mean detection threshold) so most electrodes
-    # cross threshold and the percepts are not empty.
-    amplitude = 40e-6 + sim.sample_stimulus(_stimulus(params), rescale=True)
+    # Offset to 16 uA above the activation current, rheobase * (1 +
+    # chronaxie / pulse width), so most electrodes cross threshold and
+    # the percepts are not empty.
+    activation = params['thresholding']['rheobase'] * (
+        1 + params['default_stim']['chronaxie_s']
+        / params['default_stim']['pw_default'])
+    amplitude = (activation + 16e-6
+                 + sim.sample_stimulus(_stimulus(params), rescale=True))
     out = {'amplitude': amplitude}
     for frame in range(N_FRAMES):
         percept = sim(amplitude)
@@ -84,6 +93,11 @@ def all_outputs() -> dict:
         case = f'{cell_class}_{"soft" if soft else "hard"}_' \
                f'{"+".join(hemispheres)}'
         params = small_params(cell_class, soft, hemispheres)
+        for key, value in simulator_outputs(params).items():
+            outputs[f'{case}/{key}'] = value
+    for soft, hemispheres in itertools.product(SOFT_THRESHOLD, HEMISPHERES):
+        case = f'field_{"soft" if soft else "hard"}_{"+".join(hemispheres)}'
+        params = small_params(None, soft, hemispheres, 'field_superposition')
         for key, value in simulator_outputs(params).items():
             outputs[f'{case}/{key}'] = value
     outputs.update(receptive_field_outputs(small_params(None, True, ['left'])))

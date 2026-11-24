@@ -9,6 +9,14 @@ def _amp(sim, value_a=60e-6, requires_grad=False):
                       requires_grad=requires_grad)
 
 
+def _activation_current(sim):
+    """Lowest amplitude that activates tissue at the default pulse width,
+    in A: rheobase * (1 + chronaxie / pulse width)."""
+    p = sim.params
+    return p['thresholding']['rheobase'] * (
+        1 + p['default_stim']['chronaxie_s'] / p['default_stim']['pw_default'])
+
+
 class TestForwardPass:
     def test_output_shape_and_range(self, built):
         sim, _ = built
@@ -81,8 +89,14 @@ class TestForwardPass:
 
 
 class TestPhysics:
-    def test_phosphene_size_tracks_the_current_spread_radius(self, built):
-        sim, array = built
+    def test_phosphene_size_tracks_the_current_spread_radius(
+            self, built, params_override):
+        """A single-electrode law, so without neighbors' fields."""
+        from dynaphos_lgn.simulator import LGNPhospheneSimulator
+        _, array = built
+        sim = LGNPhospheneSimulator(
+            params_override(aggregation__mode='independent'), array,
+            rng=np.random.default_rng(0))
         sim.update(_amp(sim, 40e-6))
         small = sim.size.sigma_major.detach().clone()
         sim.reset()
@@ -111,7 +125,7 @@ class TestPhysics:
 
     def test_recruited_cells_never_exceed_the_reachable_total(self, built):
         """Recruitment weights are bounded by 1, so the weighted cell
-        count can never exceed the neighbourhood's full cell count."""
+        count can never exceed the neighborhood's full cell count."""
         sim, array = built
         sim.update(_amp(sim, sim.array.max_current_ua * 1e-6))
         reachable = torch.as_tensor(array.per_layer_cell_counts(),
@@ -181,14 +195,13 @@ class TestSafetyLimit:
     def test_must_lie_within_the_precomputed_range(self, built,
                                                    params_override,
                                                    limit_ua):
-        """Above electrodes.max_current_ua the candidate neighbourhoods
+        """Above electrodes.max_current_ua the candidate neighborhoods
         are too small, so the limit would permit currents the array
         cannot model."""
-        from dynaphos_lgn.params import ParameterError
         from dynaphos_lgn.simulator import LGNPhospheneSimulator
         _, array = built
         params = params_override(default_stim__safety_limit_ua=limit_ua)
-        with pytest.raises(ParameterError, match='safety_limit_ua'):
+        with pytest.raises(ValueError, match='safety_limit_ua'):
             LGNPhospheneSimulator(params, array)
 
 
@@ -246,12 +259,13 @@ class TestGradients:
     def test_soft_threshold_gradient_beats_the_hard_gate(self, built):
         """The reason the soft threshold is on by default.
 
-        Checked just above the rheobase, where tissue activation is
-        genuinely nonzero but the electrode is still subthreshold --
-        the regime an optimiser has to be able to climb out of.
+        Checked just above the activation current, where tissue
+        activation is genuinely nonzero but the electrode is still
+        subthreshold -- the regime an optimizer has to be able to climb
+        out of.
         """
         sim, _ = built
-        amp_a = 35e-6
+        amp_a = _activation_current(sim) + 11e-6
 
         sim.soft_threshold = False
         sim.reset()
@@ -295,8 +309,8 @@ class TestGradients:
     def test_baseline_correction_keeps_the_gradient(self, built):
         """Removing the pedestal must not remove the gradient -- that
         would give back the problem the soft threshold exists to solve.
-        Compared above the rheobase, where the two forms differ only by
-        an affine rescaling of the same logistic.
+        Compared above the activation current, where the two forms
+        differ only by an affine rescaling of the same logistic.
         """
         sim, _ = built
         sim.soft_threshold = True
@@ -304,7 +318,8 @@ class TestGradients:
         for baseline in ('none', 'zero_activation'):
             sim.soft_threshold_baseline = baseline
             sim.reset()
-            amp = _amp(sim, 40e-6, requires_grad=True)
+            amp = _amp(sim, _activation_current(sim) + 16e-6,
+                       requires_grad=True)
             sim(amp).sum().backward()
             grads[baseline] = float(amp.grad.abs().sum())
         sim.soft_threshold_baseline = 'zero_activation'
@@ -322,29 +337,30 @@ class TestGradients:
         electrode renders nothing, instead of quietly restoring the glow
         the correction exists to remove.
         """
-        from dynaphos_lgn.build import (build_electrode_array, build_kernel,
-                                        build_magnification_model)
+        from dynaphos_lgn.build import build_electrode_array
+        from dynaphos_lgn.current_spread import RecruitmentKernel
         from dynaphos_lgn.simulator import LGNPhospheneSimulator
         params = params_override(
             thresholding__soft_threshold_baseline='sotf')
         rng = np.random.default_rng(0)
         array = build_electrode_array(params, synthetic_atlas,
                                       synthetic_jacobian,
-                                      build_kernel(params), rng)
-        array.magnification_model = build_magnification_model(
-            params, synthetic_atlas, synthetic_jacobian)
+                                      RecruitmentKernel.from_params(params),
+                                      rng)
         sim = LGNPhospheneSimulator(params, array, rng=rng)
         sim.soft_threshold = True
         sim.reset()
         assert float(sim(torch.zeros(sim.num_phosphenes)).max()) == 0.0
 
-    def test_optimisation_actually_moves_towards_a_target(self, built):
+    def test_optimization_actually_moves_towards_a_target(self, built):
         """The end-to-end claim: a loss on the rendered percept can drive
         the stimulation parameters."""
         sim, _ = built
         sim.soft_threshold = True
-        amp = torch.full((sim.num_phosphenes,), 30e-6, requires_grad=True)
-        optimiser = torch.optim.Adam([amp], lr=5e-6)
+        # Start just above the activation current, so there is a gradient
+        amp = torch.full((sim.num_phosphenes,),
+                         _activation_current(sim) + 6e-6, requires_grad=True)
+        optimizer = torch.optim.Adam([amp], lr=5e-6)
         sim.reset()
         target = sim(torch.full((sim.num_phosphenes,), 85e-6)).detach()
 
@@ -352,9 +368,9 @@ class TestGradients:
         for _ in range(25):
             sim.reset()
             loss = torch.nn.functional.mse_loss(sim(amp), target)
-            optimiser.zero_grad()
+            optimizer.zero_grad()
             loss.backward()
-            optimiser.step()
+            optimizer.step()
             losses.append(float(loss.detach()))
         assert losses[-1] < losses[0]
 
@@ -369,15 +385,27 @@ class TestSampling:
         assert out.shape[-1] == sim.num_phosphenes
         assert torch.all(out >= 0)
 
-    def test_receptive_field_sampling_uses_degrees_not_millimetres(self,
+    def test_receptive_field_sampling_uses_degrees_not_millimeters(self,
                                                                    built):
         """LGN receptive fields are published in degrees, so the
         sampling region is specified there directly rather than as
-        millimetres of tissue divided by a magnification."""
+        millimeters of tissue divided by a magnification."""
         sim, array = built
         mask = sim.sampling_mask
         assert mask.shape[0] == sim.num_phosphenes
         assert bool(mask.any())
+
+    def test_receptive_field_class_follows_the_tip_layer(self, built):
+        sim, array = built
+        classes = sim.params['atlas']['layers']['classes']
+        layer = array.atlas.layer[tuple(array.voxel_indices.T)]
+        expected = np.full(array.n_electrodes, '', dtype=object)
+        for name in ('magno', 'parvo'):
+            expected[np.isin(layer, classes[name])] = name
+        laminar = expected != ''
+        assert np.array_equal(array.tip_cell_class[laminar],
+                              expected[laminar].astype(str))
+        assert set(sim.rf_cell_class) <= {'magno', 'parvo'}
 
     def test_a_blank_image_stimulates_nothing(self, built):
         sim, _ = built

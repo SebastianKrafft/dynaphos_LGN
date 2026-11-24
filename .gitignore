@@ -36,3 +36,19 @@ clips/
 
 # MNIST, fetched by experiments/compare-params/compare_params.py
 /data/MNIST/
+
+# Private: probe designs and placement
+/dynaphos_lgn/probe/
+/experiments/consortium/
+
+# Local notes, papers and agent tooling
+/agent_discussion/
+/Docs/
+/.agents/
+/.gemini/
+
+*.egg-info/
+
+# Atlas viewers: kept locally, not part of the published package
+/dynaphos_lgn/viz/
+/examples/demo_lgn_explorer.ipynb

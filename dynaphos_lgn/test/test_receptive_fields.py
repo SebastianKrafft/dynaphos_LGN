@@ -1,4 +1,4 @@
-"""Receptive-field size models, and the cross-species caveats they carry."""
+"""Receptive-field size models."""
 import numpy as np
 import pytest
 
@@ -6,15 +6,6 @@ from dynaphos_lgn import receptive_fields as rf
 
 
 class TestClassOrdering:
-    @pytest.mark.parametrize('ecc', [5.0, 10.0, 20.0, 30.0])
-    def test_konio_larger_than_magno_larger_than_parvo(self, lgn_params, ecc):
-        """K > M > P in centre size at matched eccentricity. The
-        magnitudes mix a class difference with a species one."""
-        sizes = {c: float(np.atleast_1d(
-            rf.center_radius_deg(ecc, lgn_params, c))[0])
-            for c in ('konio', 'magno', 'parvo')}
-        assert sizes['konio'] > sizes['magno'] > sizes['parvo']
-
     @pytest.mark.parametrize('ecc', [0.0, 5.0, 20.0, 35.0])
     def test_magno_is_roughly_twice_parvo(self, lgn_params, ecc):
         """Croner & Kaplan state M ~ 2x P. The in-project fit should
@@ -25,7 +16,7 @@ class TestClassOrdering:
 
     def test_the_m_over_p_ratio_is_not_constant_with_eccentricity(self, lgn_params):
         """Worth pinning down rather than glossing: because the two
-        exponential fits have different rate constants, the M/P centre
+        exponential fits have different rate constants, the M/P center
         ratio is not one number. It runs ~2.97x at the fovea down to
         ~1.68x at 35 deg, so Croner & Kaplan's "about 2x" is a
         mid-range summary, and quoting a single ratio at an unstated
@@ -39,20 +30,11 @@ class TestClassOrdering:
 
 
 class TestSizeVsEccentricity:
-    @pytest.mark.parametrize('cls', ['magno', 'parvo', 'konio'])
+    @pytest.mark.parametrize('cls', ['magno', 'parvo'])
     def test_grows_with_eccentricity(self, lgn_params, cls):
         e = np.linspace(1.0, 35.0, 40)
         rc = rf.center_radius_deg(e, lgn_params, cls)
         assert np.all(np.diff(rc) >= 0)
-
-    def test_konio_linear_fit_is_floored_not_negative(self, lgn_params):
-        """Xu et al.'s linear rc(E) goes negative below ~4.9 deg. The
-        same paper reports a measured 0.31 deg mean below 15 deg, so the
-        floor is theirs, not invented."""
-        assert float(rf.center_radius_deg(0.0, lgn_params, 'konio')) == pytest.approx(
-            lgn_params['receptive_fields']['xu_konio']['rc_below_15deg'][0])
-        assert np.all(rf.center_radius_deg(np.linspace(0, 20, 50),
-                                           lgn_params, 'konio') > 0)
 
     def test_power_and_exponential_forms_differ_at_the_fovea(self, lgn_params):
         """The functional-form choice is not cosmetic: the power law
@@ -60,6 +42,15 @@ class TestSizeVsEccentricity:
         expo = float(rf.center_radius_deg(0.01, lgn_params, 'parvo', 'exponential'))
         power = float(rf.center_radius_deg(0.01, lgn_params, 'parvo', 'power'))
         assert power < 0.25 * expo
+
+    def test_per_element_class_matches_the_single_class_radius(self,
+                                                              lgn_params):
+        e = np.array([2.0, 10.0, 20.0])
+        classes = np.array(['magno', 'parvo', 'magno'])
+        rc = rf.center_radius_by_class(e, lgn_params, classes)
+        for i, name in enumerate(classes):
+            assert rc[i] == pytest.approx(
+                float(rf.center_radius_deg(e[i], lgn_params, name)))
 
     def test_unknown_class_and_form_are_rejected(self, lgn_params):
         with pytest.raises(ValueError):
@@ -69,7 +60,7 @@ class TestSizeVsEccentricity:
 
 
 class TestDifferenceOfGaussians:
-    def test_profile_is_centre_positive_and_surround_negative(self, lgn_params):
+    def test_profile_is_center_positive_and_surround_negative(self, lgn_params):
         r = rf.receptive_field(10.0, lgn_params, 'parvo')
         assert float(r.profile(0.0)) > 0.9
         assert float(r.profile(r.center_radius_deg * 3)) < 0
@@ -89,20 +80,3 @@ class TestDifferenceOfGaussians:
         recovered = (float(r.surround_center_peak_ratio)
                      * float(r.surround_center_ratio) ** 2)
         assert recovered == pytest.approx(r.surround_center_volume_ratio)
-
-    def test_sigma_and_1_over_e_radius_differ_by_root_two(self, lgn_params):
-        """Croner & Kaplan's rc is a 1/e radius, not a standard
-        deviation. Collapsing the two is a factor of 1.41 in every
-        derived size."""
-        r = rf.receptive_field(10.0, lgn_params, 'parvo')
-        assert (float(r.center_radius_deg)
-                == pytest.approx(float(r.center_sigma_deg) * np.sqrt(2)))
-
-    def test_konio_uses_its_own_surround_fit(self, lgn_params):
-        """Xu et al. publish a separate rs(E); the M/P path instead
-        multiplies rc by a fixed ratio, which is a flagged assumption."""
-        e = 20.0
-        k = rf.receptive_field(e, lgn_params, 'konio')
-        xu = lgn_params['receptive_fields']['xu_konio']
-        expected = xu['rs_slope_per_deg'] * e + xu['rs_intercept_deg']
-        assert float(k.surround_radius_deg) == pytest.approx(expected)

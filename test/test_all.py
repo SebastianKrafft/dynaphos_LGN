@@ -21,6 +21,8 @@ DATA_DIR = Path(__file__).resolve().parent / 'data'
 CONFIG_DIR = Path(__file__).resolve().parent.parent / 'config'
 PARAMS_PATH = str(CONFIG_DIR / 'params.yaml')
 MAPPING_MODELS = ['monopole', 'dipole', 'wedge-dipole']
+# Rendered maps are float32; results differ by a few ulp across torch builds
+FLOAT32_ATOL = 1e-5
 
 
 @pytest.fixture
@@ -134,7 +136,7 @@ class TestSimulator:
     def test_generate_phosphene_maps(self, simulator):
         phosphene_maps = to_numpy(simulator.phosphene_maps)
         phosphene_maps_expected = np.load(str(DATA_DIR / 'phosphene_map.npy'))
-        assert np.isclose(phosphene_maps, phosphene_maps_expected, atol=1e-8).all()
+        assert np.isclose(phosphene_maps, phosphene_maps_expected, atol=FLOAT32_ATOL).all()
 
     def test_update(self, simulator, stimulus):
         simulator.update(stimulus)
@@ -149,12 +151,12 @@ class TestSimulator:
         simulator.update(stimulus)
         activation = to_numpy(simulator.gaussian_activation())
         activation_expected = np.load(str(DATA_DIR / 'activation.npy'))
-        assert np.isclose(activation, activation_expected, atol=1e-8).all()
+        assert np.isclose(activation, activation_expected, atol=FLOAT32_ATOL).all()
 
     def test_call(self, simulator, stimulus):
         phosphenes = to_numpy(simulator(stimulus))
         phosphenes_expected = np.load(str(DATA_DIR / 'output.npy'))
-        assert np.isclose(phosphenes, phosphenes_expected, atol=1e-8).all()
+        assert np.isclose(phosphenes, phosphenes_expected, atol=FLOAT32_ATOL).all()
 
 
 class TestFunctional:
@@ -164,7 +166,7 @@ class TestFunctional:
         image = rng.random(shape) * 1e-4
         stimulus = simulator.sample_stimulus(image)
         stimulus_expected = np.load(str(DATA_DIR / 'stimulus.npy'))
-        assert np.isclose(stimulus, stimulus_expected, atol=1e-8).all()
+        assert np.isclose(to_numpy(stimulus), stimulus_expected, atol=1e-8).all()
 
     def test_image(self, params, rng):
         params['thresholding']['use_threshold'] = False
@@ -179,7 +181,7 @@ class TestFunctional:
         stimulus = simulator.sample_stimulus(frame, rescale=True)
         phosphenes = to_numpy(simulator(stimulus))
         phosphenes_expected = np.load(str(DATA_DIR / 'phosphenes_donders.npy'))
-        assert np.isclose(phosphenes, phosphenes_expected, atol=1e-8).all()
+        assert np.isclose(phosphenes, phosphenes_expected, atol=FLOAT32_ATOL).all()
 
     def test_brightness(self, params, rng):
         fps = 500

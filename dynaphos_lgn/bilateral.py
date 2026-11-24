@@ -2,19 +2,26 @@
 
 `BilateralLGNSimulator` holds one independent `LGNPhospheneSimulator`
 per nucleus and sums their unclamped percepts before a single clamp.
-Electrodes are numbered left nucleus first; `electrode_slices` and
-`hemisphere_of_electrode` say which is which.
+Everything per electrode is the nuclei's own, concatenated left nucleus
+first; `electrode_slices` and `hemisphere_of_electrode` say which is
+which.
 """
-from __future__ import annotations
-
+from operator import attrgetter
 from typing import Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 import torch
 
-from dynaphos.utils import Map, to_numpy
+from dynaphos.utils import Map
 from dynaphos_lgn.atlas import hemifield_of
 from dynaphos_lgn.simulator import LGNPhospheneSimulator
+
+
+def _per_electrode(attribute: str, doc: str = None) -> property:
+    """A numpy attribute of every nucleus's simulator, concatenated."""
+    get = attrgetter(attribute)
+    return property(lambda self: np.concatenate(
+        [get(sim) for sim in self.simulators.values()]), doc=doc)
 
 
 class BilateralLGNSimulator:
@@ -35,66 +42,36 @@ class BilateralLGNSimulator:
         self.simulators: Dict[str, LGNPhospheneSimulator] = dict(simulators)
         self.hemispheres: List[str] = list(self.simulators)
 
-        first = self.simulators[self.hemispheres[0]]
+        first = self._first
         self.data_kwargs = first.data_kwargs
         self.electrode_dimension = first.electrode_dimension
         self.batch_size = first.batch_size
         self.layer_names = first.layer_names
-        self.classes = first.classes
-
-        for name, sim in self.simulators.items():
-            if sim.electrode_dimension != self.electrode_dimension:
-                raise ValueError(
-                    f"The {name} simulator numbers its electrodes on "
-                    f"dimension {sim.electrode_dimension}, the "
-                    f"{self.hemispheres[0]} one on "
-                    f"{self.electrode_dimension}. Both nuclei must be built "
-                    f"from the same config.")
+        self.to_tensor = first.to_tensor
+        if any(sim.electrode_dimension != self.electrode_dimension
+               for sim in self.simulators.values()):
+            raise ValueError("Both nuclei must be built from the same "
+                             "config: their electrode dimensions differ.")
 
         self.counts = [sim.num_phosphenes for sim in self.simulators.values()]
         self.num_phosphenes = int(sum(self.counts))
-
         bounds = np.cumsum([0] + self.counts)
         self.electrode_slices = {
             name: slice(int(lo), int(hi))
             for name, lo, hi in zip(self.hemispheres, bounds[:-1], bounds[1:])}
-        self.hemisphere_of_electrode = np.concatenate(
-            [np.full(n, name) for name, n in zip(self.hemispheres,
-                                                 self.counts)])
-
-        self._phosphene_maps = None
-        self._sampling_mask = None
-
-    # ------------------------------------------------------------------
-    # Per-electrode views, in left-then-right order
-    # ------------------------------------------------------------------
-    def _concat_arrays(self, attribute: str) -> np.ndarray:
-        return np.concatenate([getattr(sim.array, attribute)
-                               for sim in self.simulators.values()])
 
     @property
-    def vf_xy(self) -> np.ndarray:
-        """(n, 2) visual-field position of every electrode, degrees."""
-        return self._concat_arrays('vf_xy')
+    def _first(self) -> LGNPhospheneSimulator:
+        return self.simulators[self.hemispheres[0]]
 
-    @property
-    def eccentricity_deg(self) -> np.ndarray:
-        return self._concat_arrays('eccentricity_deg')
-
-    @property
-    def inclination_deg(self) -> np.ndarray:
-        return self._concat_arrays('inclination_deg')
-
-    @property
-    def out_of_view(self) -> np.ndarray:
-        return np.concatenate([sim.out_of_view
-                               for sim in self.simulators.values()])
-
-    @property
-    def no_magnification(self) -> np.ndarray:
-        """Electrodes with no finite magnification, over both nuclei."""
-        return np.concatenate([sim.no_magnification
-                               for sim in self.simulators.values()])
+    vf_xy = _per_electrode(
+        'vf_xy', "(n, 2) visual-field position of every electrode, degrees.")
+    eccentricity_deg = _per_electrode('array.eccentricity_deg')
+    inclination_deg = _per_electrode('array.inclination_deg')
+    out_of_view = _per_electrode('out_of_view')
+    no_magnification = _per_electrode(
+        'no_magnification', "Electrodes with no finite magnification.")
+    hemisphere_of_electrode = _per_electrode('hemisphere_of_electrode')
 
     @property
     def visual_field(self) -> Map:
@@ -105,20 +82,21 @@ class BilateralLGNSimulator:
     @property
     def shape(self) -> tuple:
         """The per-electrode tensor shape, over both nuclei."""
-        first = self.simulators[self.hemispheres[0]].shape
+        first = self._first.shape
         return (first[:self.electrode_dimension] + (self.num_phosphenes,)
                 + first[self.electrode_dimension + 1:])
 
     def phosphene_sigma_deg(self, current_ua):
         """(major, minor) phosphene sigmas in degrees, both nuclei."""
-        pairs = [sim.array.phosphene_sigma_deg(current_ua)
+        pairs = [sim.phosphene_sigma_deg(current_ua)
                  for sim in self.simulators.values()]
-        return (np.concatenate([major for major, _ in pairs]),
-                np.concatenate([minor for _, minor in pairs]))
+        return tuple(np.concatenate(axis) for axis in zip(*pairs))
 
-    # ------------------------------------------------------------------
-    # Splitting and joining
-    # ------------------------------------------------------------------
+    def _cat(self, values, dim: Optional[int] = None) -> torch.Tensor:
+        """Per-nucleus tensors joined along the electrode dimension."""
+        return torch.cat(list(values),
+                         dim=self.electrode_dimension if dim is None else dim)
+
     def split(self, x, name: str = 'value') -> List[Optional[torch.Tensor]]:
         """Cut a per-electrode tensor into one piece per hemisphere.
         Scalars are broadcast to every hemisphere.
@@ -146,97 +124,71 @@ class BilateralLGNSimulator:
                 f"first; see electrode_slices.")
         return list(torch.split(tensor, self.counts, dim=dim))
 
-    # ------------------------------------------------------------------
-    # Runtime
-    # ------------------------------------------------------------------
     def reset(self):
         for sim in self.simulators.values():
             sim.reset()
 
-    def to_tensor(self, x) -> torch.Tensor:
-        return self.simulators[self.hemispheres[0]].to_tensor(x)
-
     def update(self, amplitude, pulse_width=None, frequency=None):
         """Advance both nuclei by one frame."""
-        amplitudes = self.split(amplitude, 'amplitude')
-        pulse_widths = self.split(pulse_width, 'pulse_width')
-        frequencies = self.split(frequency, 'frequency')
-        for sim, amp, pw, freq in zip(self.simulators.values(), amplitudes,
-                                      pulse_widths, frequencies):
-            sim.update(amp, pw, freq)
-
-    def spatial_activation(self) -> torch.Tensor:
-        """Per-electrode activation maps, both nuclei, left first."""
-        return torch.cat([sim.spatial_activation()
-                          for sim in self.simulators.values()],
-                         dim=self.electrode_dimension)
+        inputs = zip(self.split(amplitude, 'amplitude'),
+                     self.split(pulse_width, 'pulse_width'),
+                     self.split(frequency, 'frequency'))
+        for sim, pieces in zip(self.simulators.values(), inputs):
+            sim.update(*pieces)
 
     def __call__(self, amplitude, pulse_width=None,
                  frequency=None) -> torch.Tensor:
         """Render one frame of simulated percept, whole visual field."""
         self.update(amplitude, pulse_width, frequency)
-        return sum(sim.unclamped_percept()
-                   for sim in self.simulators.values()).clamp(0, 1)
+        return self._first.finish(sum(sim.unclamped_percept()
+                                      for sim in self.simulators.values()))
 
-    # ------------------------------------------------------------------
-    # Stimulus sampling
-    # ------------------------------------------------------------------
+    def spatial_activation(self) -> torch.Tensor:
+        """Per-electrode activation maps, both nuclei, left first."""
+        return self._cat(sim.spatial_activation()
+                         for sim in self.simulators.values())
+
     @property
     def phosphene_maps(self) -> torch.Tensor:
-        """(n, H, W) distance from every pixel to each phosphene centre."""
-        if self._phosphene_maps is None:
-            self._phosphene_maps = torch.cat(
-                [sim.phosphene_maps for sim in self.simulators.values()],
-                dim=0)
-        return self._phosphene_maps
+        """(n, H, W) distance from every pixel to each phosphene center."""
+        return self._cat((sim.phosphene_maps
+                          for sim in self.simulators.values()), dim=0)
 
     @property
     def sampling_mask(self) -> torch.Tensor:
-        if self._sampling_mask is None:
-            self._sampling_mask = torch.cat(
-                [sim.sampling_mask for sim in self.simulators.values()],
-                dim=0)
-        return self._sampling_mask
+        return self._cat((sim.sampling_mask
+                          for sim in self.simulators.values()), dim=0)
 
     def sample_stimulus(self, activation_mask,
                         rescale: bool = False) -> torch.Tensor:
         """Turn an image into per-electrode amplitudes for both nuclei."""
-        return torch.cat([sim.sample_stimulus(activation_mask, rescale)
-                          for sim in self.simulators.values()], dim=-1)
+        return self._cat((sim.sample_stimulus(activation_mask, rescale)
+                          for sim in self.simulators.values()), dim=-1)
 
-    # ------------------------------------------------------------------
-    # Reporting
-    # ------------------------------------------------------------------
     def get_state(self) -> Dict[str, torch.Tensor]:
-        """Both nuclei's state, concatenated over electrodes."""
+        """Both nuclei's state, concatenated over electrodes. Strings,
+        such as the aggregation modes, are shared by both nuclei and
+        passed through."""
         states = [sim.get_state() for sim in self.simulators.values()]
-        dim = self.electrode_dimension
         out = {}
-        for key in states[0]:
+        for key, first in states[0].items():
             values = [state[key] for state in states]
-            out[key] = (None if any(v is None for v in values)
-                        else torch.cat(values, dim=dim))
+            if isinstance(first, str):
+                out[key] = first
+            elif any(value is None for value in values):
+                out[key] = None
+            else:
+                out[key] = self._cat(values)
         return out
 
     def layer_activation_table(self) -> Dict[str, np.ndarray]:
         """Last frame's per-layer recruitment, keyed by layer name, rows
         over all electrodes."""
-        return self._table('layer_activation', self.layer_names)
-
-    def class_fraction_table(self) -> Dict[str, np.ndarray]:
-        """Last frame's share of recruited cells per percept class."""
-        return self._table('class_fraction', self.classes)
-
-    def _table(self, attribute: str, names) -> Dict[str, np.ndarray]:
-        """A per-electrode state tensor of both nuclei, split by its last
-        axis into named columns."""
-        values = [getattr(sim, attribute) for sim in self.simulators.values()]
-        if any(v is None for v in values):
-            raise RuntimeError(f"No {attribute} yet: call the simulator "
-                               f"first.")
-        values = np.concatenate([to_numpy(v.detach()) for v in values],
-                                axis=self.electrode_dimension)
-        return {name: values[..., i] for i, name in enumerate(names)}
+        tables = [sim.layer_activation_table()
+                  for sim in self.simulators.values()]
+        return {name: np.concatenate([table[name] for table in tables],
+                                     axis=self.electrode_dimension)
+                for name in self.layer_names}
 
     def describe(self) -> str:
         lines = [f"BilateralLGNSimulator: {self.num_phosphenes} electrodes "

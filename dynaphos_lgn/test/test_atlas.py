@@ -23,36 +23,43 @@ pytestmark = pytest.mark.skipif(
     reason=f'Real Erwin atlas not found in {ATLAS_DIR}.')
 
 # Independently found by a separate, prior investigation against this
-# exact Atlas_Data directory -- a regression check on the foveal-column
-# count, not just a number quoted from the paper.
-EXPECTED_FOVEAL_VOXEL_COUNT = 11_055
+# exact Atlas_Data directory -- a regression check on the count of raw
+# ECC.DAT == 0 voxels, not just a number quoted from the paper.
+EXPECTED_ZERO_ECCENTRICITY_VOXEL_COUNT = 11_055
+# Rows in foveola.dat, as supplied by J. Malpeli.
+EXPECTED_FOVEOLA_COLUMN_LENGTH = 66
+
+requires_foveola_file = pytest.mark.skipif(
+    not (ATLAS_DIR / 'foveola.dat').exists(),
+    reason=f'foveola.dat not found in {ATLAS_DIR}.')
 
 
 @pytest.fixture(scope='module')
 def atlas(lgn_params):
     # ErwinAtlas now takes the parameter dictionary: the grid shape,
     # sentinels, voxel size, Horsley-Clarke origin and laminar codes all
-    # come from `atlas` in config/params_lgn.yaml rather than from
+    # come from `atlas` in dynaphos_lgn/config/params_lgn.yaml rather than from
     # hardcoded values.
-    return ErwinAtlas(lgn_params).build_atlas(ATLAS_DIR)
+    return ErwinAtlas(lgn_params).read(ATLAS_DIR)
 
 
-def get_foveal_voxels(atlas: ErwinAtlas) -> np.ndarray:
-    """Voxels of the foveal projection column (raw ECC.DAT == 0), found
-    from the array rather than from the function under test."""
+def zero_eccentricity_voxels(atlas: ErwinAtlas) -> np.ndarray:
+    """Voxels with raw ECC.DAT == 0, found from the array rather than
+    from the function under test. A ~0.4 mm wide region around the
+    foveola's column, not the column itself."""
     return np.argwhere(atlas.eccentricity == 0)
 
 
-def test_horsley_clarke_to_index_roundtrips_on_foveal_column(atlas):
+def test_horsley_clarke_to_index_roundtrips_at_zero_eccentricity(atlas):
     """horsley_clarke_to_index should be the exact inverse of the atlas's
     own index -> mm convention."""
-    foveal_voxels = get_foveal_voxels(atlas)
-    assert len(foveal_voxels) == EXPECTED_FOVEAL_VOXEL_COUNT
+    foveal_voxels = zero_eccentricity_voxels(atlas)
+    assert len(foveal_voxels) == EXPECTED_ZERO_ECCENTRICITY_VOXEL_COUNT
 
     ml_idx, dv_idx, ap_idx = foveal_voxels.T
-    ml_mm = atlas._origin_ml_mm + ml_idx * atlas._voxel_size_mm
-    dv_mm = atlas._origin_dv_mm + dv_idx * atlas._voxel_size_mm
-    ap_mm = atlas._origin_ap_mm + ap_idx * atlas._voxel_size_mm
+    ml_mm = atlas._origin_ml_mm + ml_idx * atlas.voxel_size_mm
+    dv_mm = atlas._origin_dv_mm + dv_idx * atlas.voxel_size_mm
+    ap_mm = atlas._origin_ap_mm + ap_idx * atlas.voxel_size_mm
 
     roundtrip_ml, roundtrip_dv, roundtrip_ap = atlas.horsley_clarke_to_index(
         ml_mm, dv_mm, ap_mm)
@@ -62,14 +69,45 @@ def test_horsley_clarke_to_index_roundtrips_on_foveal_column(atlas):
     assert np.array_equal(roundtrip_ap, ap_idx)
 
 
-def test_foveal_column_sits_posteriorly(atlas):
-    """The foveal column sits at the posterior (low-AP) end of the
+@requires_foveola_file
+def test_foveola_column_sits_posteriorly(atlas):
+    """The foveola's column sits at the posterior (low-AP) end of the
     nucleus, as the paper states."""
-    foveal_voxels = get_foveal_voxels(atlas)
-    ap_idx = foveal_voxels[:, 2]
+    ap_idx = atlas.foveola_column[:, 2]
+    assert ap_idx.mean() < 0.25 * atlas.atlas_shape[2]
 
-    ap_size = atlas.atlas_shape[2]
-    assert ap_idx.mean() < 0.25 * ap_size
+
+@requires_foveola_file
+def test_foveola_column_lies_in_parvo_tissue_at_zero_eccentricity(
+        atlas, lgn_params):
+    """Every voxel is at ECC.DAT == 0 (the loader checks this too) and
+    in a parvocellular layer or an interlaminar gap: the magno layers
+    never reach zero eccentricity in this atlas."""
+    from dynaphos_lgn.params import resolve_class_codes
+
+    column = atlas.foveola_column
+    assert column.shape == (EXPECTED_FOVEOLA_COLUMN_LENGTH, 3)
+    assert np.all(atlas.eccentricity[tuple(column.T)] == 0)
+    allowed = [atlas.missing_layer, *resolve_class_codes(lgn_params,
+                                                          'parvo')]
+    assert np.all(np.isin(atlas.layer[tuple(column.T)], allowed))
+
+
+@requires_foveola_file
+def test_foveola_column_mm_maps_back_to_its_indices(atlas):
+    ml_mm, dv_mm, ap_mm = atlas.foveola_column_mm.T
+    assert np.array_equal(
+        np.column_stack(atlas.horsley_clarke_to_index(ml_mm, dv_mm, ap_mm)),
+        atlas.foveola_column)
+
+
+def test_no_ipsilateral_placeholder_at_zero_eccentricity(atlas):
+    """The fovea belongs to both hemifields, so none of it may be
+    excluded as ipsilateral tissue."""
+    fovea = atlas.valid & (atlas.eccentricity == 0)
+    assert fovea.sum() > 0
+    assert not (fovea & atlas.is_ipsi_sentinel()).any()
+    assert np.array_equal(atlas.eligible(exclude_ipsi=True) & fovea, fovea)
 
 
 # ======================================================================
@@ -159,22 +197,83 @@ def test_ipsilateral_placeholder_still_marks_the_other_hemifield(mirrored):
     assert sorted(mirrored.ipsi_sentinel_values) == [-45.0, 45.0]
     placeholder = mirrored.is_ipsi_sentinel() & mirrored.valid
     assert placeholder.sum() > 0
-    # Not strictly positive: a placeholder voxel at zero eccentricity
-    # sits on the fovea, which belongs to no hemifield.
-    x = hemifield_x(mirrored)[placeholder]
-    assert np.all(x >= 0)
-    assert (x > 0).mean() > 0.9
+    # Strictly positive: the loader moved the placeholder off zero
+    # eccentricity, where it would name no hemifield.
+    assert np.all(hemifield_x(mirrored)[placeholder] > 0)
 
 
-def test_foveal_column_reflects_to_the_mirrored_indices(atlas, mirrored):
+def test_zero_eccentricity_reflects_to_the_mirrored_indices(atlas, mirrored):
     """A landmark that is found in the raw array rather than derived
-    from the transform under test: the foveola's projection column must
+    from the transform under test: the zero-eccentricity voxels must
     appear in the mirrored volume at the reflected ML index, and nowhere
     else."""
-    foveal = get_foveal_voxels(atlas)
+    foveal = zero_eccentricity_voxels(atlas)
     reflected = foveal.copy()
     reflected[:, 0] = atlas.atlas_shape[0] - 1 - reflected[:, 0]
     assert np.array_equal(
         np.argwhere(mirrored.eccentricity == 0)[np.lexsort(
             np.argwhere(mirrored.eccentricity == 0).T[::-1])],
         reflected[np.lexsort(reflected.T[::-1])])
+
+
+@requires_foveola_file
+def test_foveola_column_reflects_with_the_nucleus(atlas, mirrored):
+    """Reflected indices, still at zero eccentricity, and the same
+    Horsley-Clarke position: ML is lateral distance in both nuclei."""
+    column = mirrored.foveola_column
+    assert np.array_equal(column[:, 0],
+                          atlas.atlas_shape[0] - 1 - atlas.foveola_column[:, 0])
+    assert np.array_equal(column[:, 1:], atlas.foveola_column[:, 1:])
+    assert np.all(mirrored.eccentricity[tuple(column.T)] == 0)
+    assert np.allclose(mirrored.foveola_column_mm, atlas.foveola_column_mm)
+
+
+# ======================================================================
+# The central 1 deg (atlas notes, "Eccentricity Assignments for the
+# Central 1 Degree")
+# ======================================================================
+def test_published_center_omits_the_area_factor(atlas, lgn_params):
+    """ECC.DAT's laminar volume below each 0.1 deg zone boundary is a
+    fixed multiple of the integral of Eq. 2 over E, not over the
+    hemifield's area: the area element's factor E appears to be
+    missing."""
+    from scipy.integrate import quad
+    from dynaphos_lgn.magnification import malpeli_volume_magnification
+
+    laminar = atlas.valid
+    voxel_mm3 = atlas.voxel_size_mm ** 3
+    ratios = []
+    for level in range(10):
+        bound = level / 10 + 0.05
+        count = int((laminar & (atlas.eccentricity <= level)).sum())
+        linear = quad(lambda e: malpeli_volume_magnification(e, lgn_params),
+                      0, bound)[0] / voxel_mm3
+        ratios.append(count / linear)
+    assert np.ptp(ratios) < 0.03 * np.mean(ratios)
+
+
+@requires_foveola_file
+def test_rebuilt_center_keeps_the_published_order(atlas, lgn_params):
+    """The recipe's ranking reproduces ECC.DAT's ordering; only the
+    values assigned along it differ."""
+    from scipy.stats import spearmanr
+    from dynaphos_lgn.fovea import central_region, interpolation_rank
+
+    central = central_region(atlas, lgn_params)
+    rank = interpolation_rank(atlas, lgn_params)
+    assert spearmanr(rank[central], atlas.eccentricity[central])[0] > 0.98
+
+
+@requires_foveola_file
+def test_only_the_parvo_layers_reach_the_column(atlas, lgn_params):
+    """The column crosses parvo layers 3 and 4; the magno layers' closest
+    approach lies off it, with a non-zero eccentricity."""
+    from dynaphos_lgn.fovea import foveal_references
+    from dynaphos_lgn.params import resolve_class_codes
+
+    references = foveal_references(atlas, lgn_params)
+    for code in resolve_class_codes(lgn_params, 'parvo'):
+        assert references[code].distance_mm == 0
+    for code in resolve_class_codes(lgn_params, 'magno'):
+        assert references[code].distance_mm > 0.05
+        assert references[code].eccentricity_deg > 0.1

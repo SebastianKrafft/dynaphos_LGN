@@ -5,19 +5,33 @@ The published atlas is a single left LGN, covering the right hemifield.
 `MirroredAtlas` and `MirroredJacobianAtlas` reflect it across the
 midline to stand in for the right LGN.
 """
+import itertools
 import logging
 from pathlib import Path
 from typing import Mapping, Optional, Tuple, Union
 
 import numpy as np
 
-from dynaphos_lgn.params import require, resolve_class_codes
+from dynaphos_lgn.params import resolve_class_codes
+from dynaphos_lgn.fovea import apply_central_eccentricity
+from dynaphos_lgn.magnification import JacobianMagnification
 
 
 class Atlas:
     #: Which nucleus this volume represents. Only `MirroredAtlas`
     #: changes it.
     hemisphere = 'left'
+
+    #: True for the closed-form stand-in (`SyntheticAtlas`).
+    is_synthetic = False
+
+    #: (n, 3) (ML, DV, AP) voxel indices of the foveola's projection
+    #: column, or None when not loaded.
+    foveola_column = None
+
+    #: Which central 1 deg `eccentricity_deg` holds: 'published' or
+    #: 'rebuilt' (see `fovea.py`).
+    central_eccentricity = 'published'
 
     def __init__(self, params: Optional[Mapping] = None):
         self.params = params
@@ -32,30 +46,30 @@ class ErwinAtlas(Atlas):
 
     def __init__(self, params: Mapping):
         super().__init__(params)
-        self.atlas_shape = tuple(require(params, 'atlas.shape_ml_dv_ap'))
+        self.atlas_shape = tuple(params['atlas']['shape_ml_dv_ap'])
 
-        sentinels = require(params, 'atlas.sentinels')
-        self._missing_ecc_incl = sentinels['eccentricity_inclination']
-        self._missing_layer = sentinels['layer']
+        sentinels = params['atlas']['sentinels']
+        self.missing_ecc_incl = sentinels['eccentricity_inclination']
+        self.missing_layer = sentinels['layer']
 
-        files = require(params, 'atlas.files')
+        files = params['atlas']['files']
         self._files = files
-        self._file_order = require(params, 'atlas.file_order')
-        self._ecc_scale = files['eccentricity']['scale']
-        self._incl_scale = files['inclination']['scale']
-        self._cells_scale = files['cells']['scale']
+        self._file_order = params['atlas']['file_order']
+        self.ecc_scale = files['eccentricity']['scale']
+        self.incl_scale = files['inclination']['scale']
+        self.cells_scale = files['cells']['scale']
 
         # index = (coord - origin) / voxel_size on all three axes
-        origin = require(params, 'atlas.horsley_clarke_origin_mm')
+        origin = params['atlas']['horsley_clarke_origin_mm']
         self._origin_ml_mm = origin['ml']
         self._origin_dv_mm = origin['dv']
         self._origin_ap_mm = origin['ap']
-        self._voxel_size_mm = require(params, 'atlas.voxel_size_mm')
+        self.voxel_size_mm = params['atlas']['voxel_size_mm']
 
     @property
     def ipsi_sentinel_values(self) -> list:
         """Inclination values that mark the ipsilateral placeholder."""
-        flat = require(self.params, 'atlas.ipsi_flat_inclination_deg')
+        flat = self.params['atlas']['ipsi_flat_inclination_deg']
         return [-flat, flat]
 
     def is_ipsi_sentinel(self, inclination: Optional[np.ndarray] = None
@@ -81,15 +95,15 @@ class ErwinAtlas(Atlas):
             mask &= ~self.is_ipsi_sentinel()
         return mask
 
-    def build_atlas(self, atlas_dir: Optional[Union[str, Path]] = None
-                    ) -> 'ErwinAtlas':
+    def read(self, atlas_dir: Optional[Union[str, Path]] = None
+             ) -> 'ErwinAtlas':
         """Load the four .DAT files named in `atlas.files`.
 
         :param atlas_dir: Directory containing them. Defaults to
             `atlas.directory`.
         """
         if atlas_dir is None:
-            atlas_dir = require(self.params, 'atlas.directory')
+            atlas_dir = self.params['atlas']['directory']
         atlas_dir = Path(atlas_dir)
 
         def load(key):
@@ -101,16 +115,66 @@ class ErwinAtlas(Atlas):
         self.inclination = load('inclination')
         self.layer = load('layer')
         self.cells = load('cells')
+        self.clear_foveal_placeholder()
         self.update_valid()
+        self.foveola_column = self.load_foveola_column(atlas_dir)
 
         self.eccentricity_deg = (self.eccentricity
-                                 / np.float32(self._ecc_scale))
+                                 / np.float32(self.ecc_scale))
         self.inclination_deg = (self.inclination
-                                / np.float32(self._incl_scale))
+                                / np.float32(self.incl_scale))
         self.cells_per_voxel = (self.cells
-                                / np.float32(self._cells_scale))
+                                / np.float32(self.cells_scale))
 
-        return self
+        return apply_central_eccentricity(self, self.params)
+
+    def clear_foveal_placeholder(self):
+        """Move the ipsilateral placeholder off zero eccentricity.
+
+        Inclination is undefined at the fovea, which belongs to both
+        hemifields, so +-135 deg there would wrongly exclude foveal
+        tissue. It becomes +-90 deg: the vertical meridian, same quadrant.
+        """
+        at_fovea = (self.eccentricity == 0) & self.is_ipsi_sentinel()
+        self.inclination[at_fovea] = (np.sign(self.inclination[at_fovea])
+                                      * 90 * self.incl_scale)
+
+    def load_foveola_column(self, atlas_dir: Union[str, Path]
+                            ) -> Optional[np.ndarray]:
+        """Read `atlas.foveola_file`, checking every voxel is in bounds and
+        at zero eccentricity.
+
+        :return: (n, 3) int (ML, DV, AP) indices, or None, with a warning,
+            when the file is absent.
+        """
+        name = self.params['atlas'].get('foveola_file')
+        if name is None:
+            return None
+        path = Path(atlas_dir) / name
+        if not path.exists():
+            logging.warning("No foveola column at %s; foveola_column is "
+                            "None.", path)
+            return None
+
+        column = np.loadtxt(path, dtype=int, ndmin=2, encoding='utf-8-sig')
+        if (column.shape[1] != 3 or np.any(column < 0)
+                or np.any(column >= self.atlas_shape)):
+            raise ValueError(f"{path} is not a list of (ML, DV, AP) indices "
+                             f"inside the grid {self.atlas_shape}.")
+        off_fovea = self.eccentricity[tuple(column.T)] != 0
+        if off_fovea.any():
+            raise ValueError(f"{off_fovea.sum()} of the {len(column)} voxels "
+                             f"in {path} are not at zero eccentricity; the "
+                             f"file does not match this atlas.")
+        return column
+
+    @property
+    def foveola_column_mm(self) -> Optional[np.ndarray]:
+        """`foveola_column` in Horsley-Clarke mm, (n, 3) (ML, DV, AP)."""
+        if self.foveola_column is None:
+            return None
+        return np.column_stack(
+            self.index_to_horsley_clarke(*self.foveola_column.T))
 
     @property
     def layer_codes(self) -> np.ndarray:
@@ -119,9 +183,9 @@ class ErwinAtlas(Atlas):
 
     def update_valid(self):
         """Recompute `valid`: retinotopy known and a layer assigned."""
-        self.valid = ((self.eccentricity != self._missing_ecc_incl)
-                      & (self.inclination != self._missing_ecc_incl)
-                      & (self.layer != self._missing_layer))
+        self.valid = ((self.eccentricity != self.missing_ecc_incl)
+                      & (self.inclination != self.missing_ecc_incl)
+                      & (self.layer != self.missing_layer))
 
     def horsley_clarke_to_index(self, ml_mm: Union[float, np.ndarray],
                                 dv_mm: Union[float, np.ndarray],
@@ -149,7 +213,7 @@ class ErwinAtlas(Atlas):
 
         def to_index(mm, origin):
             return np.round((np.asarray(mm) - origin)
-                            / self._voxel_size_mm).astype(int)
+                            / self.voxel_size_mm).astype(int)
 
         ml_idx = self._ml_index(to_index(ml_mm, self._origin_ml_mm))
         dv_idx = to_index(dv_mm, self._origin_dv_mm)
@@ -175,7 +239,7 @@ class ErwinAtlas(Atlas):
             arrays otherwise. `ml_mm` is lateral distance from the midline.
         """
         def to_mm(index, origin):
-            return np.asarray(index) * self._voxel_size_mm + origin
+            return np.asarray(index) * self.voxel_size_mm + origin
 
         ml_mm = to_mm(self._ml_index(np.asarray(ml_idx)), self._origin_ml_mm)
         dv_mm = to_mm(dv_idx, self._origin_dv_mm)
@@ -197,13 +261,13 @@ class JacobianAtlas(Atlas):
 
     :ivar jacobian: (*shape, 2, 3) deg/mm, NaN where the fit failed.
     :ivar jacobian_valid: Whether the fit was accepted.
-    :ivar n_neighbors: Valid neighbours used per voxel.
-    :ivar residual_rms: In-neighbourhood fit residual, deg.
+    :ivar n_neighbors: Valid neighbors used per voxel.
+    :ivar residual_rms: In-neighborhood fit residual, deg.
     :ivar transition_probe_residual: Extrapolation mismatch at the probe
         distance, deg.
     :ivar isotropic_flag: Inside `atlas.isotropic_construction_radius_deg`.
     :ivar unreliable_beyond_neighborhood_flag: The Jacobian should not
-        be extrapolated past its fit neighbourhood.
+        be extrapolated past its fit neighborhood.
     """
 
     def __init__(self, params: Mapping):
@@ -218,94 +282,105 @@ class JacobianAtlas(Atlas):
         self.unreliable_beyond_neighborhood_flag = None
         self._svd = None                # filled by `singular_values`
 
-    def compute(self, erwin_atlas: 'ErwinAtlas') -> 'JacobianAtlas':
+    def compute(self, atlas: 'ErwinAtlas') -> 'JacobianAtlas':
         """Fit a local linear map, mm offset -> visual-field (x, y)
-        offset, at every valid voxel of `erwin_atlas`.
+        offset, at every valid voxel of `atlas`.
 
         Fits in Cartesian (x, y) rather than (eccentricity, inclination)
         to avoid the polar singularity at the fovea. Parameters come from
         `atlas.jacobian`.
         """
-        cfg = require(self.params, 'atlas.jacobian')
-        neighborhood_radius_vox = cfg['neighborhood_radius_vox']
-        min_neighbors = cfg['min_neighbors']
-        ridge = cfg['ridge']
-        transition_probe_distance_vox = cfg['transition_probe_distance_vox']
-        transition_residual_threshold_deg = cfg[
-            'transition_residual_threshold_deg']
+        cfg = self.params['atlas']['jacobian']
+        voxel_size = atlas.voxel_size_mm
+        valid = atlas.eligible(exclude_ipsi=self.params['atlas'][
+            'exclude_ipsi_flat_inclination'])
+        incl_rad = np.deg2rad(atlas.inclination_deg)
+        x = (atlas.eccentricity_deg * np.cos(incl_rad)).astype(
+            np.float32)
+        y = (atlas.eccentricity_deg * np.sin(incl_rad)).astype(
+            np.float32)
 
-        shape = erwin_atlas.atlas_shape
-        voxel_size = erwin_atlas._voxel_size_mm
-        dtype = np.float32
+        ata, atb, btb, n_neighbors = self._normal_equations(
+            valid, x, y, voxel_size, cfg['neighborhood_radius_vox'])
+        fit_ok = valid & (n_neighbors >= cfg['min_neighbors'])
+        jacobian = self._solve(ata, atb, cfg['ridge'])
+        jacobian[~fit_ok] = np.nan
 
-        valid = erwin_atlas.eligible(exclude_ipsi=require(
-            self.params, 'atlas.exclude_ipsi_flat_inclination'))
+        # RSS via the OLS identity y'y - beta'(X'y), reusing the sums.
+        rss = np.maximum(sum(
+            btb[k] - (jacobian[..., k, 0] * atb[0, k]
+                      + jacobian[..., k, 1] * atb[1, k]
+                      + jacobian[..., k, 2] * atb[2, k])
+            for k in range(2)), 0)       # guard tiny float negatives
+        residual_rms = np.sqrt(rss / np.maximum(n_neighbors, 1))
+        residual_rms[~fit_ok] = np.nan
+        del ata, atb, btb, rss
 
-        incl_rad = np.deg2rad(erwin_atlas.inclination_deg)
-        x = (erwin_atlas.eccentricity_deg * np.cos(incl_rad)).astype(dtype)
-        y = (erwin_atlas.eccentricity_deg * np.sin(incl_rad)).astype(dtype)
+        probe_residual, probe_valid = self._probe_residual(
+            jacobian, valid, x, y, voxel_size,
+            cfg['transition_probe_distance_vox'])
 
-        # A^T A (symmetric, 6 unique entries) and A^T b, accumulated as
-        # separate scalar fields rather than (*shape, 3, 3) arrays, to
-        # avoid multi-GB broadcast temporaries.
-        m00 = np.zeros(shape, dtype=dtype)
-        m01 = np.zeros(shape, dtype=dtype)
-        m02 = np.zeros(shape, dtype=dtype)
-        m11 = np.zeros(shape, dtype=dtype)
-        m12 = np.zeros(shape, dtype=dtype)
-        m22 = np.zeros(shape, dtype=dtype)
-        r0x = np.zeros(shape, dtype=dtype)
-        r0y = np.zeros(shape, dtype=dtype)
-        r1x = np.zeros(shape, dtype=dtype)
-        r1y = np.zeros(shape, dtype=dtype)
-        r2x = np.zeros(shape, dtype=dtype)
-        r2y = np.zeros(shape, dtype=dtype)
-        n_neighbors = np.zeros(shape, dtype=dtype)
-        sum_dqx2 = np.zeros(shape, dtype=dtype)
-        sum_dqy2 = np.zeros(shape, dtype=dtype)
+        self.atlas_shape = atlas.atlas_shape
+        self.jacobian = jacobian
+        self.jacobian_valid = fit_ok
+        self.n_neighbors = n_neighbors
+        self.residual_rms = residual_rms
+        self.transition_probe_residual = probe_residual
+        self.isotropic_flag = fit_ok & (
+            atlas.eccentricity_deg
+            < self.params['atlas']['isotropic_construction_radius_deg'])
+        self.unreliable_beyond_neighborhood_flag = (
+            fit_ok & probe_valid
+            & (probe_residual > cfg['transition_residual_threshold_deg']))
+        return self
 
-        r = neighborhood_radius_vox
-        for dm in range(-r, r + 1):
-            for dd in range(-r, r + 1):
-                for da in range(-r, r + 1):
-                    if dm == 0 and dd == 0 and da == 0:
-                        continue
+    def _normal_equations(self, valid, x, y, voxel_size: float, radius: int):
+        """Sums of the least-squares fit over each voxel's neighbors.
 
-                    shifted_valid, shifted_x, shifted_y = self._shift(
-                        (dm, dd, da), shape, valid, x, y)
+        With A the neighbor offsets in mm and b their visual-field
+        offsets, returns A^T A (its 6 unique entries, keyed (i, j)),
+        A^T b (keyed (axis, x or y)), b^T b (per x, y) and the neighbor
+        count. Each is a scalar field of the atlas's shape, to avoid
+        multi-GB (*shape, 3, 3) temporaries.
+        """
+        shape = valid.shape
 
-                    w = shifted_valid.astype(dtype)
-                    am, ad, aa = (dm * voxel_size, dd * voxel_size,
-                                  da * voxel_size)
-                    dqx = shifted_x - x
-                    dqy = shifted_y - y
+        def zeros():
+            return np.zeros(shape, dtype=np.float32)
 
-                    m00 += w * (am * am)
-                    m01 += w * (am * ad)
-                    m02 += w * (am * aa)
-                    m11 += w * (ad * ad)
-                    m12 += w * (ad * aa)
-                    m22 += w * (aa * aa)
+        pairs = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)]
+        ata = {pair: zeros() for pair in pairs}
+        atb = {(i, k): zeros() for i in range(3) for k in range(2)}
+        btb = [zeros(), zeros()]
+        n_neighbors = zeros()
 
-                    r0x += w * am * dqx
-                    r0y += w * am * dqy
-                    r1x += w * ad * dqx
-                    r1y += w * ad * dqy
-                    r2x += w * aa * dqx
-                    r2y += w * aa * dqy
+        steps = range(-radius, radius + 1)
+        for offset in itertools.product(steps, steps, steps):
+            if offset == (0, 0, 0):
+                continue
+            shifted_valid, shifted_x, shifted_y = self._shift(
+                offset, shape, valid, x, y)
+            w = shifted_valid.astype(np.float32)
+            a = [step * voxel_size for step in offset]
+            dq = (shifted_x - x, shifted_y - y)
+            for i, j in pairs:
+                ata[i, j] += w * (a[i] * a[j])
+            for i in range(3):
+                for k in range(2):
+                    atb[i, k] += w * a[i] * dq[k]
+            for k in range(2):
+                btb[k] += w * dq[k] * dq[k]
+            n_neighbors += w
+        return ata, atb, btb, n_neighbors
 
-                    sum_dqx2 += w * dqx * dqx
-                    sum_dqy2 += w * dqy * dqy
+    @staticmethod
+    def _solve(ata: dict, atb: dict, ridge: float) -> np.ndarray:
+        """(*shape, 2, 3) Jacobians from the normal equations, by the
+        closed-form inverse of the ridged, symmetric 3x3 A^T A."""
+        m00, m01, m02 = ata[0, 0] + ridge, ata[0, 1], ata[0, 2]
+        m11, m12, m22 = ata[1, 1] + ridge, ata[1, 2], ata[2, 2] + ridge
 
-                    n_neighbors += w
-
-        fit_ok = valid & (n_neighbors >= min_neighbors)
-
-        m00 += ridge
-        m11 += ridge
-        m22 += ridge
-
-        # Closed-form inverse of the symmetric 3x3 via its adjugate
+        # Adjugate
         c00 = m11 * m22 - m12 * m12
         c01 = m02 * m12 - m01 * m22
         c02 = m01 * m12 - m02 * m11
@@ -313,80 +388,51 @@ class JacobianAtlas(Atlas):
         c12 = m01 * m02 - m00 * m12
         c22 = m00 * m11 - m01 * m01
         det = m00 * c00 + m01 * c01 + m02 * c02
-        det = np.where(det == 0, np.finfo(dtype).tiny, det)
-
-        inv00, inv01, inv02 = c00 / det, c01 / det, c02 / det
-        inv11, inv12 = c11 / det, c12 / det
-        inv22 = c22 / det
+        det = np.where(det == 0, np.finfo(np.float32).tiny, det)
+        inverse = [[c00 / det, c01 / det, c02 / det],
+                   [c01 / det, c11 / det, c12 / det],
+                   [c02 / det, c12 / det, c22 / det]]
         del c00, c01, c02, c11, c12, c22, det
-        del m00, m01, m02, m11, m12, m22
 
-        jacobian = np.empty(shape + (2, 3), dtype=dtype)
-        jacobian[..., 0, 0] = inv00 * r0x + inv01 * r1x + inv02 * r2x
-        jacobian[..., 0, 1] = inv01 * r0x + inv11 * r1x + inv12 * r2x
-        jacobian[..., 0, 2] = inv02 * r0x + inv12 * r1x + inv22 * r2x
-        jacobian[..., 1, 0] = inv00 * r0y + inv01 * r1y + inv02 * r2y
-        jacobian[..., 1, 1] = inv01 * r0y + inv11 * r1y + inv12 * r2y
-        jacobian[..., 1, 2] = inv02 * r0y + inv12 * r1y + inv22 * r2y
-        jacobian[~fit_ok] = np.nan
-        del inv00, inv01, inv02, inv11, inv12, inv22
+        jacobian = np.empty(m00.shape + (2, 3), dtype=np.float32)
+        for k in range(2):
+            for j in range(3):
+                jacobian[..., k, j] = (inverse[0][j] * atb[0, k]
+                                       + inverse[1][j] * atb[1, k]
+                                       + inverse[2][j] * atb[2, k])
+        return jacobian
 
-        # RSS via the OLS identity y'y - beta'(X'y), reusing the sums
-        # accumulated above instead of a second pass.
-        rss_x = sum_dqx2 - (jacobian[..., 0, 0] * r0x
-                            + jacobian[..., 0, 1] * r1x
-                            + jacobian[..., 0, 2] * r2x)
-        rss_y = sum_dqy2 - (jacobian[..., 1, 0] * r0y
-                            + jacobian[..., 1, 1] * r1y
-                            + jacobian[..., 1, 2] * r2y)
-        rss = np.maximum(rss_x + rss_y, 0)  # guard tiny float negatives
-        del rss_x, rss_y, sum_dqx2, sum_dqy2
-        del r0x, r0y, r1x, r1y, r2x, r2y
-        residual_rms = np.sqrt(rss / np.maximum(n_neighbors, 1))
-        residual_rms[~fit_ok] = np.nan
-        del rss
+    def _probe_residual(self, jacobian, valid, x, y, voxel_size: float,
+                        distance_vox: int):
+        """Largest mismatch between each voxel's Jacobian, extrapolated
+        `distance_vox` along every axis, and the atlas there.
 
-        isotropic_flag = fit_ok & (
-            erwin_atlas.eccentricity_deg
-            < require(self.params, 'atlas.isotropic_construction_radius_deg'))
+        A 1-voxel fit cannot see a tear in the map; this can.
 
-        # A 1-voxel fit cannot see a tear, so extrapolate each voxel's
-        # Jacobian out to a probe point and compare against the atlas.
-        probe_vox = transition_probe_distance_vox
-        probe_offsets = [(probe_vox, 0, 0), (-probe_vox, 0, 0),
-                         (0, probe_vox, 0), (0, -probe_vox, 0),
-                         (0, 0, probe_vox), (0, 0, -probe_vox)]
-        max_probe_residual = np.zeros(shape, dtype=dtype)
-        any_probe_valid = np.zeros(shape, dtype=bool)
-        for offset in probe_offsets:
-            shifted_valid_p, shifted_x_p, shifted_y_p = self._shift(
-                offset, shape, valid, x, y)
-            pm, pd, pa = (offset[0] * voxel_size, offset[1] * voxel_size,
-                          offset[2] * voxel_size)
-            pred_x = (x + jacobian[..., 0, 0] * pm
-                      + jacobian[..., 0, 1] * pd + jacobian[..., 0, 2] * pa)
-            pred_y = (y + jacobian[..., 1, 0] * pm
-                      + jacobian[..., 1, 1] * pd + jacobian[..., 1, 2] * pa)
-            probe_residual = np.sqrt((shifted_x_p - pred_x) ** 2
-                                     + (shifted_y_p - pred_y) ** 2)
-            probe_residual = np.where(shifted_valid_p, probe_residual, 0)
-            max_probe_residual = np.maximum(max_probe_residual, probe_residual)
-            any_probe_valid |= shifted_valid_p
-        max_probe_residual[~any_probe_valid] = np.nan
-
-        unreliable = (fit_ok & any_probe_valid
-                      & (max_probe_residual
-                         > transition_residual_threshold_deg))
-
-        self.atlas_shape = shape
-        self.jacobian = jacobian
-        self.jacobian_valid = fit_ok
-        self.n_neighbors = n_neighbors
-        self.residual_rms = residual_rms
-        self.transition_probe_residual = max_probe_residual
-        self.isotropic_flag = isotropic_flag
-        self.unreliable_beyond_neighborhood_flag = unreliable
-        return self
+        :return: (residual in deg, NaN where no probe point is valid;
+            whether any probe point is valid).
+        """
+        shape = valid.shape
+        residual = np.zeros(shape, dtype=np.float32)
+        any_valid = np.zeros(shape, dtype=bool)
+        for axis in range(3):
+            for sign in (1, -1):
+                offset = [0, 0, 0]
+                offset[axis] = sign * distance_vox
+                shifted_valid, shifted_x, shifted_y = self._shift(
+                    tuple(offset), shape, valid, x, y)
+                p = [step * voxel_size for step in offset]
+                predicted = [
+                    q + jacobian[..., k, 0] * p[0]
+                    + jacobian[..., k, 1] * p[1] + jacobian[..., k, 2] * p[2]
+                    for k, q in enumerate((x, y))]
+                mismatch = np.sqrt((shifted_x - predicted[0]) ** 2
+                                   + (shifted_y - predicted[1]) ** 2)
+                residual = np.maximum(
+                    residual, np.where(shifted_valid, mismatch, 0))
+                any_valid |= shifted_valid
+        residual[~any_valid] = np.nan
+        return residual, any_valid
 
     def jacobian_at(self, voxel_indices: np.ndarray) -> np.ndarray:
         """The (n, 2, 3) Jacobians at the given (ml, dv, ap) indices."""
@@ -408,9 +454,7 @@ class JacobianAtlas(Atlas):
         :return: (major, minor, orientation_rad), each a float32 array of
             the atlas's shape, NaN where `jacobian_valid` is False.
         """
-        from dynaphos_lgn.magnification import JacobianMagnification
-
-        chunk_size = require(self.params, 'atlas.jacobian.svd_chunk_size')
+        chunk_size = self.params['atlas']['jacobian']['svd_chunk_size']
         shape = self.jacobian_valid.shape
         flat_jacobian = self.jacobian.reshape(-1, 2, 3)
         index = np.flatnonzero(self.jacobian_valid.ravel())
@@ -459,8 +503,8 @@ class JacobianAtlas(Atlas):
                 residual_rms=self.residual_rms,
                 transition_probe_residual=self.transition_probe_residual,
                 isotropic_flag=self.isotropic_flag,
-                # Historical key name, so older caches still load
-                near_transition_flag=self.unreliable_beyond_neighborhood_flag)
+                unreliable_beyond_neighborhood_flag=(
+                    self.unreliable_beyond_neighborhood_flag))
 
     @classmethod
     def load(cls, path: Union[str, Path], params: Mapping) -> 'JacobianAtlas':
@@ -473,7 +517,7 @@ class JacobianAtlas(Atlas):
         atlas.transition_probe_residual = data['transition_probe_residual']
         atlas.isotropic_flag = data['isotropic_flag']
         atlas.unreliable_beyond_neighborhood_flag = \
-            data['near_transition_flag']
+            data['unreliable_beyond_neighborhood_flag']
         atlas.atlas_shape = atlas.jacobian_valid.shape
         return atlas
 
@@ -546,27 +590,27 @@ class MirroredAtlas(ErwinAtlas):
     def __init__(self, atlas: ErwinAtlas, params: Optional[Mapping] = None):
         params = atlas.params if params is None else params
         super().__init__(params)
-        if getattr(atlas, 'hemisphere', 'left') != 'left':
+        if atlas.hemisphere != 'left':
             raise ValueError(
                 f"MirroredAtlas reflects the left LGN, but was given a "
                 f"{atlas.hemisphere!r} one.")
         self.base = atlas
         # The source wins on grid geometry: a SyntheticAtlas has its own.
         self.atlas_shape = atlas.atlas_shape
-        self._voxel_size_mm = atlas._voxel_size_mm
-        self._ml_axis = int(require(params, 'atlas.mirror.ml_axis'))
-        self.build_atlas()
+        self.voxel_size_mm = atlas.voxel_size_mm
+        self._ml_axis = int(params['atlas']['mirror']['ml_axis'])
+        self._reflect()
 
     @property
     def is_synthetic(self) -> bool:
-        return bool(getattr(self.base, 'is_synthetic', False))
+        return self.base.is_synthetic
 
     @property
     def _reverse(self) -> tuple:
         return _ml_reversed(len(self.atlas_shape), self._ml_axis)
 
-    def build_atlas(self, atlas_dir=None) -> 'MirroredAtlas':
-        """Reflect the source atlas. `atlas_dir` is ignored."""
+    def _reflect(self) -> 'MirroredAtlas':
+        """Reflect the source atlas."""
         base = self.base
         flip = self._reverse
 
@@ -577,11 +621,17 @@ class MirroredAtlas(ErwinAtlas):
         self.cells_per_voxel = base.cells_per_voxel[flip]
 
         self.inclination = mirror_inclination(
-            base.inclination[flip], scale=self._incl_scale,
-            sentinel=self._missing_ecc_incl)
+            base.inclination[flip], scale=self.incl_scale,
+            sentinel=self.missing_ecc_incl)
         self.inclination_deg = (self.inclination
-                                / np.float32(self._incl_scale))
+                                / np.float32(self.incl_scale))
         self.update_valid()
+
+        self.central_eccentricity = base.central_eccentricity
+        if base.foveola_column is not None:
+            self.foveola_column = base.foveola_column.copy()
+            ml = self.foveola_column[:, self._ml_axis]
+            ml[:] = self.atlas_shape[self._ml_axis] - 1 - ml
         return self
 
     @property
@@ -616,7 +666,7 @@ class MirroredJacobianAtlas(JacobianAtlas):
     def __init__(self, jacobian_atlas: JacobianAtlas, params: Mapping):
         super().__init__(params)
         self.base = jacobian_atlas
-        self._ml_axis = int(require(params, 'atlas.mirror.ml_axis'))
+        self._ml_axis = int(params['atlas']['mirror']['ml_axis'])
         self.atlas_shape = jacobian_atlas.atlas_shape
         flip = self._reverse
 
@@ -634,7 +684,7 @@ class MirroredJacobianAtlas(JacobianAtlas):
         self._sign = np.array([[1.0, -1.0, -1.0],
                                [-1.0, 1.0, 1.0]], dtype=np.float32)
         self._reversed_jacobian = jacobian_atlas.jacobian[flip]
-        self._materialised = None
+        self._materialized = None
 
     @property
     def _reverse(self) -> tuple:
@@ -646,18 +696,18 @@ class MirroredJacobianAtlas(JacobianAtlas):
 
     @property
     def jacobian(self) -> np.ndarray:
-        """The whole reflected field, materialised on first access.
+        """The whole reflected field, materialized on first access.
 
         Costs a second full-grid copy; the pipeline itself only uses
         `jacobian_at` and `decompose_valid`.
         """
-        if self._materialised is None:
+        if self._materialized is None:
             logging.warning(
-                "Materialising the full mirrored Jacobian (%s float32, "
+                "Materializing the full mirrored Jacobian (%s float32, "
                 "about %.1f GB).", self._reversed_jacobian.shape,
                 self._reversed_jacobian.size * 4 / 1e9)
-            self._materialised = self._reversed_jacobian * self._sign
-        return self._materialised
+            self._materialized = self._reversed_jacobian * self._sign
+        return self._materialized
 
     @jacobian.setter
     def jacobian(self, value):
@@ -676,7 +726,7 @@ class MirroredJacobianAtlas(JacobianAtlas):
         return (major[flip], minor[flip],
                 mirror_orientation(orientation[flip]))
 
-    def compute(self, erwin_atlas) -> 'MirroredJacobianAtlas':
+    def compute(self, atlas) -> 'MirroredJacobianAtlas':
         raise NotImplementedError(
             "A mirrored Jacobian is derived from the left LGN's fit. "
             "Compute the left one and wrap it.")

@@ -4,7 +4,7 @@ Two renderers, chosen per electrode:
 
 `EllipseGaussianRenderer`
     One elliptical Gaussian per electrode, shaped by the local
-    magnification at its centre.
+    magnification at its center.
 `ScatterRenderer`
     Every recruited voxel splatted at its own atlas position, weighted
     by its recruitment.
@@ -12,8 +12,6 @@ Two renderers, chosen per electrode:
 Both return activation maps with a peak of 1; brightness is applied by
 the simulator.
 """
-from __future__ import annotations
-
 import math
 from typing import Mapping, Optional, Tuple
 
@@ -21,15 +19,18 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from dynaphos_lgn.params import require
 
 
 def visual_field_grid(params: Mapping, device=None, dtype=None
                       ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Pixel-centre coordinates of the rendered image, in degrees."""
-    res_x, res_y = require(params, 'run.resolution')
-    x_org, y_org = require(params, 'run.origin')
-    half = require(params, 'run.view_angle') / 2
+    """Pixel-center coordinates of the rendered image, in degrees.
+
+    Row 0 is the lower visual field (y increases with the row), so show
+    images with ``origin='lower'`` or flip camera frames.
+    """
+    res_x, res_y = params['run']['resolution']
+    x_org, y_org = params['run']['origin']
+    half = params['run']['view_angle'] / 2
     x = torch.linspace(x_org - half, x_org + half, res_x,
                        device=device, dtype=dtype)
     y = torch.linspace(y_org - half, y_org + half, res_y,
@@ -40,7 +41,7 @@ def visual_field_grid(params: Mapping, device=None, dtype=None
 class EllipseGaussianRenderer:
     """Anisotropic Gaussian phosphenes, one per electrode.
 
-    :param centers_xy: (n, 2) phosphene centres in visual-field degrees.
+    :param centers_xy: (n, 2) phosphene centers in visual-field degrees.
     :param orientation_rad: (n,) major-axis direction, radians.
     :param params: Dynaphos-style parameter dict (needs `run`).
     :param data_kwargs: ``dict(device=..., dtype=...)``.
@@ -78,14 +79,52 @@ class EllipseGaussianRenderer:
         return torch.exp(-0.5 * ((self.u / sa) ** 2 + (self.v / sb) ** 2))
 
 
-def _gaussian_kernel1d(sigma_px: torch.Tensor, radius: int) -> torch.Tensor:
-    """(n, 2*radius+1) normalised 1-D Gaussian kernels, differentiable
-    in `sigma_px`."""
+def _gaussian_kernel1d(sigma_px: torch.Tensor, radius: int,
+                       truncation_sigmas: float) -> torch.Tensor:
+    """(n, 2*radius+1) normalized 1-D Gaussian kernels, differentiable
+    in `sigma_px`.
+
+    Each kernel is tapered to reach zero at its own `truncation_sigmas`
+    (or one tap past `radius`, if that is nearer) instead of stepping
+    down to it, so a separable blur leaves no hard-edged square around a
+    splatted point -- and a kernel does not depend on how wide the others
+    sharing the array are.
+    """
     offsets = torch.arange(-radius, radius + 1, device=sigma_px.device,
                            dtype=sigma_px.dtype)
     s = torch.clamp(sigma_px, min=1e-3)[:, None]
+    cut = torch.clamp(truncation_sigmas * s, max=radius + 1)
     k = torch.exp(-0.5 * (offsets[None, :] / s) ** 2)
+    k = torch.clamp(k - torch.exp(-0.5 * (cut / s) ** 2), min=0.0)
     return k / k.sum(dim=1, keepdim=True)
+
+
+def gaussian_blur(images: torch.Tensor, sigma_px: torch.Tensor,
+                  truncation_sigmas: float, max_radius_px: int
+                  ) -> torch.Tensor:
+    """Separable Gaussian blur, one bandwidth per image.
+
+    :param images: (n, H, W).
+    :param sigma_px: (n,) bandwidth, pixels.
+    :param truncation_sigmas: Kernel half-width, in sigmas of the widest
+        bandwidth.
+    :param max_radius_px: Kernel half-width budget. Past it the tapered
+        kernel still falls to zero, just over fewer sigmas.
+    """
+    n, h, w = images.shape
+    # Sized from the live bandwidth so a narrow blur stays cheap.
+    radius = int(min(max_radius_px,
+                     max(1, math.ceil(truncation_sigmas
+                                      * float(sigma_px.detach().max())))))
+    kernel = _gaussian_kernel1d(sigma_px, radius, truncation_sigmas)
+    kx = kernel.reshape(n, 1, 1, -1)
+    ky = kernel.reshape(n, 1, -1, 1)
+    images = images.reshape(1, n, h, w)
+    images = F.conv2d(F.pad(images, (radius, radius, 0, 0),
+                            mode='constant'), kx, groups=n)
+    images = F.conv2d(F.pad(images, (0, 0, radius, radius),
+                            mode='constant'), ky, groups=n)
+    return images.reshape(n, h, w)
 
 
 class ScatterRenderer:
@@ -93,10 +132,12 @@ class ScatterRenderer:
 
     Point positions are fixed, so their bilinear splat weights are
     precomputed; the forward pass is a scatter-add into a per-electrode
-    patch followed by a separable Gaussian blur.
+    patch followed by a separable Gaussian blur. The patch is padded by
+    the widest kernel the bandwidth ceiling allows, so a splat is never
+    cropped by its own patch.
 
     :param points_xy: (n_electrodes, n_points, 2) point positions, deg.
-    :param centers_xy: (n_electrodes, 2) patch centres, deg.
+    :param centers_xy: (n_electrodes, 2) patch centers, deg.
     :param params: Dynaphos-style parameter dict.
     :param patch_radius_deg: (n_electrodes,) half-width of each patch.
     :param bandwidth_floor_deg: (n_electrodes,) lower clamp on the splat
@@ -117,9 +158,9 @@ class ScatterRenderer:
         device = data_kwargs.get('device', None)
         dtype = data_kwargs.get('dtype', torch.float32)
 
-        res_x, res_y = require(params, 'run.resolution')
-        x_org, y_org = require(params, 'run.origin')
-        half = require(params, 'run.view_angle') / 2
+        res_x, res_y = params['run']['resolution']
+        x_org, y_org = params['run']['origin']
+        half = params['run']['view_angle'] / 2
         self.resolution = (res_y, res_x)
         self.deg_per_px_x = (2 * half) / max(res_x - 1, 1)
         self.deg_per_px_y = (2 * half) / max(res_y - 1, 1)
@@ -129,13 +170,43 @@ class ScatterRenderer:
         centers = np.asarray(centers_xy, dtype=float)
         self.n_electrodes, self.n_points, _ = points.shape
 
+        # -- bandwidth clamps ---------------------------------------
+        px_deg = min(self.deg_per_px_x, self.deg_per_px_y)
+        floor_px = params['rendering']['scatter_bandwidth_floor_pixels']
+        floor = np.maximum(np.nan_to_num(bandwidth_floor_deg),
+                           floor_px * px_deg)
+        ceiling = np.maximum(np.nan_to_num(bandwidth_ceiling_deg),
+                             floor * 1.001)
+        self.bandwidth_floor = torch.as_tensor(floor, device=device,
+                                               dtype=dtype)
+        self.bandwidth_ceiling = torch.as_tensor(ceiling, device=device,
+                                                 dtype=dtype)
+        self._smooth_clamp_softness = params['rendering'][
+            'smooth_clamp_softness_fraction']
+
+        # -- blur kernel budget (fixed) ------------------------------
+        # `bandwidth_deg` never exceeds the ceiling (a smooth min stays
+        # below its bound), and the extra blur widens it in quadrature,
+        # so this is the widest kernel `render` needs.
+        self.kernel_truncation_sigmas = params['rendering'][
+            'scatter_kernel_truncation_sigmas']
+        widest = math.hypot(float(np.max(ceiling)), extra_blur_deg)
+        self.max_kernel_radius_px = max(1, math.ceil(
+            self.kernel_truncation_sigmas * widest / px_deg))
+
         # -- patch geometry (fixed) ---------------------------------
+        # Points are kept within `point_radius_px` of the center; the
+        # patch adds the bilinear splat's extra pixel and the kernel
+        # budget around that, so whatever is kept is blurred in full.
         radius_px_x = np.ceil(np.asarray(patch_radius_deg)
                               / self.deg_per_px_x).astype(int)
         radius_px_y = np.ceil(np.asarray(patch_radius_deg)
                               / self.deg_per_px_y).astype(int)
-        self.patch_radius_px = int(max(1, min(int(np.nanmax(
+        self.point_radius_px = int(max(1, min(int(np.nanmax(
             np.maximum(radius_px_x, radius_px_y))), max(res_x, res_y))))
+        self.patch_margin_px = self.max_kernel_radius_px
+        self.patch_radius_px = (self.point_radius_px + 1
+                                + self.patch_margin_px)
         self.patch_size = 2 * self.patch_radius_px + 1
 
         cx = np.round((centers[:, 0] - self.x_min) / self.deg_per_px_x)
@@ -158,8 +229,12 @@ class ScatterRenderer:
         for dy in (0, 1):
             for dx in (0, 1):
                 xi, yi = x0 + dx, y0 + dy
-                inside = ((xi >= 0) & (xi < self.patch_size)
-                          & (yi >= 0) & (yi < self.patch_size))
+                # Only the core, not the margin: a point splatted into
+                # the margin would have its kernel cut by the patch edge.
+                lo = self.patch_margin_px
+                hi = self.patch_size - self.patch_margin_px
+                inside = ((xi >= lo) & (xi < hi)
+                          & (yi >= lo) & (yi < hi))
                 w = ((fx if dx else 1 - fx) * (fy if dy else 1 - fy))
                 idx_list.append(np.where(inside,
                                          yi * self.patch_size + xi, 0))
@@ -186,26 +261,8 @@ class ScatterRenderer:
         self.image_mask = torch.as_tensor(
             inside.reshape(self.n_electrodes, -1), device=device,
             dtype=dtype)
-
-        # -- bandwidth clamps ---------------------------------------
-        px_deg = min(self.deg_per_px_x, self.deg_per_px_y)
-        floor_px = require(params, 'rendering.scatter_bandwidth_floor_pixels')
-        floor = np.maximum(np.nan_to_num(bandwidth_floor_deg),
-                           floor_px * px_deg)
-        ceiling = np.maximum(np.nan_to_num(bandwidth_ceiling_deg),
-                             floor * 1.001)
-        self.bandwidth_floor = torch.as_tensor(floor, device=device,
-                                               dtype=dtype)
-        self.bandwidth_ceiling = torch.as_tensor(ceiling, device=device,
-                                                 dtype=dtype)
-        self.max_kernel_radius_px = (
-            require(params, 'rendering.max_kernel_radius_px')
-            + math.ceil(3 * extra_blur_deg / px_deg))
-        self._smooth_clamp_softness = require(
-            params, 'rendering.smooth_clamp_softness_fraction')
         self._dtype, self._device = dtype, device
 
-    # ------------------------------------------------------------------
     def bandwidth_deg(self, weights: torch.Tensor,
                       points_xy: torch.Tensor,
                       adaptive: bool = True) -> torch.Tensor:
@@ -255,22 +312,14 @@ class ScatterRenderer:
                             device=w.device, dtype=w.dtype)
         patch = patch.scatter_add(
             2, self.splat_index.expand(batch, -1, -1), contrib)
-        # Every (row, electrode) pair is its own channel, so one grouped
-        # convolution blurs them all with their own kernels.
-        patch = patch.reshape(1, batch * n, self.patch_size, self.patch_size)
+        # Every (row, electrode) pair is its own image, blurred with its
+        # own kernel.
+        patch = patch.reshape(batch * n, self.patch_size, self.patch_size)
 
         sigma_px = (bandwidth_deg.expand(*lead, n).reshape(-1)
                     / min(self.deg_per_px_x, self.deg_per_px_y))
-        radius = int(min(self.max_kernel_radius_px,
-                         max(1, math.ceil(3.0 * float(
-                             sigma_px.detach().max())))))
-        kernel = _gaussian_kernel1d(sigma_px, radius)
-        kx = kernel.reshape(batch * n, 1, 1, -1)
-        ky = kernel.reshape(batch * n, 1, -1, 1)
-        patch = F.conv2d(F.pad(patch, (radius, radius, 0, 0),
-                               mode='constant'), kx, groups=batch * n)
-        patch = F.conv2d(F.pad(patch, (0, 0, radius, radius),
-                               mode='constant'), ky, groups=batch * n)
+        patch = gaussian_blur(patch, sigma_px, self.kernel_truncation_sigmas,
+                              self.max_kernel_radius_px)
 
         patch = patch.reshape(batch, n, -1)
         peak = patch.amax(dim=-1, keepdim=True)

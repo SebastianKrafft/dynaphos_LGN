@@ -1,5 +1,7 @@
 """Magnification models, checked against published numbers and against
 an analytically-known synthetic map."""
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -10,7 +12,7 @@ from .conftest import requires_real_atlas
 
 
 class TestMalpeliFormulas:
-    """Eqs 1-2 of Malpeli, Lee & Baker (1996), verified full text."""
+    """Eqs 3-4 of Malpeli, Lee & Baker (1996), verified full text."""
 
     @pytest.mark.parametrize('ecc, expected', [
         (1.0, 2.611e4), (3.0, 8639.), (5.0, 3958.), (11.0, 872.6),
@@ -58,25 +60,6 @@ class TestMalpeliFormulas:
         assert magno == pytest.approx(expected['magno_cells'], rel=0.06)
 
 
-class TestLocalMagnification:
-    def test_isotropic_case_has_unit_anisotropy(self):
-        v = np.array([3.0, 5.0])
-        local = mg.LocalMagnification(v, v.copy(), np.zeros(2),
-                                      np.zeros(2, bool), np.zeros(2, bool),
-                                      np.ones(2, bool))
-        assert np.allclose(local.anisotropy, 1.0)
-        assert np.allclose(local.linear_mm_per_deg, 1.0 / v)
-
-    def test_areal_and_linear_are_consistent(self):
-        major, minor = np.array([4.0]), np.array([1.0])
-        local = mg.LocalMagnification(major, minor, np.zeros(1),
-                                      np.zeros(1, bool), np.zeros(1, bool),
-                                      np.ones(1, bool))
-        assert local.areal_deg2_per_mm2[0] == pytest.approx(4.0)
-        assert local.linear_mm_per_deg[0] == pytest.approx(0.5)
-        assert local.anisotropy[0] == pytest.approx(4.0)
-
-
 class TestJacobianAgainstAnalyticGroundTruth:
     """The synthetic atlas has a closed-form retinotopic map, so the
     Jacobian machinery can be checked against the exact answer rather
@@ -95,7 +78,7 @@ class TestJacobianAgainstAnalyticGroundTruth:
             synthetic_atlas.analytic_magnification_deg_per_mm(ecc),
             dtype=float))
         # 20% is loose on purpose: the fit sees a 25 um grid carrying
-        # eccentricity quantised to 0.1 deg and inclination to 1 deg, so
+        # eccentricity quantized to 0.1 deg and inclination to 1 deg, so
         # exact agreement would be suspicious rather than reassuring.
         assert np.allclose(fitted, analytic, rtol=0.2)
 
@@ -113,317 +96,11 @@ class TestJacobianAgainstAnalyticGroundTruth:
         assert np.all(np.isnan(major[~synthetic_jacobian.jacobian_valid]))
 
 
-@pytest.fixture
-def malpeli_model(lgn_params):
-    """The density-derived model with rho_v supplied explicitly.
-
-    The shipped config sets `cells_per_mm3` to null, meaning "derive it
-    from the atlas" -- so a test that wants the model without an atlas
-    has to say what rho_v is, which is exactly the behaviour being
-    checked elsewhere.
-    """
-    return mg.MalpeliDensityMagnification(
-        lgn_params, 'parvo', cells_per_mm3=0.36 / 0.025 ** 3)
-
-
-class TestMalpeliDensityMagnification:
-    def test_null_density_requires_the_atlas(self, lgn_params):
-        """A null in the config means 'derive this', not 'guess'."""
-        with pytest.raises(ValueError, match='from_atlas'):
-            mg.MalpeliDensityMagnification(lgn_params, 'parvo')
-
-    def test_interval_is_ordered(self, malpeli_model):
-        m = malpeli_model
-        lo, mid, hi = m.interval(np.array([1.0, 10.0, 30.0]))
-        assert np.all(lo <= mid) and np.all(mid <= hi)
-
-    def test_reports_a_range_not_a_point(self, malpeli_model):
-        """The project's rule: more than one arbitrary choice in the
-        derivation chain means the output is an interval."""
-        m = malpeli_model
-        lo, mid, hi = m.interval(10.0)
-        assert hi / lo > 1.5
-
-    def test_rejects_a_class_it_was_not_built_for(self, malpeli_model):
-        m = malpeli_model
-        with pytest.raises(ValueError):
-            m.at_eccentricity(10.0, cell_class='magno')
-
-    def test_column_thickness_may_be_split_by_class(self,
-                                                    params_override):
-        """The measured T is ~2.4x larger for parvo than for magno, so
-        a single shared triple is necessarily wrong for one class. Both
-        config shapes have to work: the original shared triple, and a
-        per-class split.
-        """
-        params = params_override(
-            magnification__density_derived__column_thickness_mm={
-                'parvo': [0.40, 0.84, 1.77],
-                'magno': [0.20, 0.39, 0.74]})
-        rho = 0.36 / 0.025 ** 3
-        parvo = mg.MalpeliDensityMagnification(params, 'parvo',
-                                               cells_per_mm3=rho)
-        magno = mg.MalpeliDensityMagnification(params, 'magno',
-                                               cells_per_mm3=rho)
-        assert parvo.column_thickness_mm == (0.40, 0.84, 1.77)
-        assert magno.column_thickness_mm == (0.20, 0.39, 0.74)
-
-    def test_shared_column_thickness_still_works(self, lgn_params):
-        """The original single-triple shape must keep working -- the
-        split is an added option, not a migration."""
-        model = mg.MalpeliDensityMagnification(
-            lgn_params, 'magno', cells_per_mm3=0.36 / 0.025 ** 3)
-        assert len(model.column_thickness_mm) == 3
-
-    def test_partial_class_split_is_refused(self, params_override):
-        """Half a split is worse than none: the missing class would
-        quietly inherit whatever the dict iteration happened to give."""
-        params = params_override(
-            magnification__density_derived__column_thickness_mm={
-                'parvo': [0.40, 0.84, 1.77]})
-        with pytest.raises(ValueError, match='magno'):
-            mg.MalpeliDensityMagnification(params, 'magno',
-                                           cells_per_mm3=1e4)
-
-    def test_rho_v_may_be_a_profile(self, lgn_params):
-        """Packing density measures as eccentricity-dependent (1.5x
-        parvo, 2.6x magno centre-to-periphery), so `cells_per_mm3` has
-        to be expressible as a function of eccentricity and not only as
-        a scalar."""
-        def profile(ecc):
-            return 20000.0 + 0.0 * np.asarray(ecc, float)
-
-        model = mg.MalpeliDensityMagnification(lgn_params, 'parvo',
-                                               cells_per_mm3=profile)
-        flat = mg.MalpeliDensityMagnification(lgn_params, 'parvo',
-                                              cells_per_mm3=20000.0)
-        e = np.array([1.0, 10.0, 30.0])
-        # A constant profile must reproduce the scalar exactly -- if it
-        # does not, the profile path is not wired to the same arithmetic.
-        assert np.allclose(model.volume_magnification_mm3_per_deg2(e),
-                           flat.volume_magnification_mm3_per_deg2(e))
-
-    def test_profile_rho_v_changes_the_magnification(self, lgn_params):
-        """And a non-constant one has to actually bite, in the right
-        direction: more cells per mm^3 means less tissue per degree."""
-        def dense_centre(ecc):
-            return np.where(np.asarray(ecc, float) < 5.0, 40000.0, 20000.0)
-
-        model = mg.MalpeliDensityMagnification(lgn_params, 'parvo',
-                                               cells_per_mm3=dense_centre)
-        flat = mg.MalpeliDensityMagnification(lgn_params, 'parvo',
-                                              cells_per_mm3=20000.0)
-        _, central, _ = model.interval(np.array([1.0]))
-        _, central_flat, _ = flat.interval(np.array([1.0]))
-        _, outer, _ = model.interval(np.array([30.0]))
-        _, outer_flat, _ = flat.interval(np.array([30.0]))
-        assert central[0] == pytest.approx(
-            central_flat[0] / np.sqrt(2.0), rel=1e-9)
-        assert outer[0] == pytest.approx(outer_flat[0], rel=1e-9)
-
-
-def test_from_atlas_can_build_an_eccentricity_resolved_rho_v(
-        synthetic_atlas, lgn_params):
-    """The profile has to be buildable from an atlas object, not only
-    hand-supplied. Checked on the synthetic atlas so it runs without
-    the 145 MB download -- this is a wiring test, not a biology one."""
-    model = mg.MalpeliDensityMagnification.from_atlas(
-        synthetic_atlas, lgn_params, cell_class='parvo',
-        eccentricity_resolved=True)
-    assert model.cells_per_mm3_profile is not None
-    sampled = model.cells_per_mm3_at(np.array([2.0, 10.0, 30.0]))
-    assert np.all(np.isfinite(sampled)) and np.all(sampled > 0)
-
-    flat = mg.MalpeliDensityMagnification.from_atlas(
-        synthetic_atlas, lgn_params, cell_class='parvo')
-    assert flat.cells_per_mm3_profile is None
-
-
-def test_rho_v_profile_does_not_extrapolate_to_zero(synthetic_atlas,
-                                                    lgn_params):
-    """rho_v falls monotonically with eccentricity, so extrapolating the
-    trend past the last populated bin would run it towards zero and send
-    the magnification to infinity. np.interp holds the endpoints flat;
-    pinned because switching to a fitted extrapolation would break it
-    silently and only far out in the periphery."""
-    model = mg.MalpeliDensityMagnification.from_atlas(
-        synthetic_atlas, lgn_params, cell_class='parvo',
-        eccentricity_resolved=True)
-    far = model.cells_per_mm3_at(np.array([500.0]))
-    last = model.cells_per_mm3_profile.cells_per_mm3[-1]
-    assert far[0] == pytest.approx(last, rel=1e-9)
-    assert np.all(model.cells_per_mm3_at(np.array([0.0, 1e-6])) > 0)
-
-
-class TestAtlasGradient:
-    def test_from_jacobian_is_isotropic_by_construction(
-            self, synthetic_atlas, synthetic_jacobian, lgn_params):
-        jm = mg.JacobianMagnification(synthetic_jacobian, lgn_params,
-                                      synthetic_atlas)
-        scalar = mg.AtlasGradientMagnification.from_jacobian(jm, 'parvo')
-        local = scalar.at_eccentricity(np.array([5.0, 15.0]))
-        assert np.allclose(local.anisotropy, 1.0)
-        assert np.all(local.isotropic_by_construction)
-
-
-class TestBinReliability:
-    """`_bin_reliability` in isolation, with hand-built grids -- this is
-    the mechanism that is supposed to catch the real atlas's inclination
-    seam once the table is fine enough to isolate it to a few bins."""
-
-    def test_flags_low_count_bins(self):
-        value_grid = np.full((2, 5), 10.0)
-        n_grid = np.full((2, 5), 100.0)
-        n_grid[0, 2] = 1.0
-        reliable = mg._bin_reliability(value_grid, n_grid,
-                                       min_voxels_per_bin=20,
-                                       outlier_z_threshold=4.0)
-        assert not reliable[0, 2]
-        assert reliable.sum() == reliable.size - 1
-
-    def test_flags_a_row_outlier(self):
-        """A single bin far from its row's typical value -- the tear
-        signature -- gets flagged even though it has plenty of voxels."""
-        value_grid = np.full((1, 9), 10.0)
-        value_grid[0, 4] = 100.0
-        n_grid = np.full((1, 9), 100.0)
-        reliable = mg._bin_reliability(value_grid, n_grid,
-                                       min_voxels_per_bin=20,
-                                       outlier_z_threshold=4.0)
-        assert not reliable[0, 4]
-        assert reliable[0].sum() == 8
-
-    def test_does_not_flag_a_smooth_row(self):
-        value_grid = np.linspace(1.0, 20.0, 10).reshape(1, 10)
-        n_grid = np.full((1, 10), 100.0)
-        reliable = mg._bin_reliability(value_grid, n_grid,
-                                       min_voxels_per_bin=20,
-                                       outlier_z_threshold=4.0)
-        assert np.all(reliable)
-
-
-class TestAnisotropicGradient:
-    @pytest.fixture
-    def model(self, synthetic_atlas, synthetic_jacobian, lgn_params):
-        jm = mg.JacobianMagnification(synthetic_jacobian, lgn_params,
-                                      synthetic_atlas)
-        return mg.AnisotropicGradientMagnification.from_jacobian(
-            jm, 'parvo', params=lgn_params)
-
-    def test_mirrored_model_answers_in_the_reflected_frame(self, model):
-        """The right nucleus's query at (E, 180 - I) is the left table's
-        answer at (E, I), with the orientation seen in a mirror -- and a
-        query on the +-180 deg seam is just the left table's I = 0."""
-        mirrored = mg.MirroredMagnification(model)
-        ecc = np.array([5.0, 15.0, 15.0])
-        incl = np.array([10.0, -30.0, 0.0])
-        left = model.at_eccentricity(ecc, inclination_deg=incl)
-        right = mirrored.at_eccentricity(ecc, inclination_deg=180.0 - incl)
-        assert np.allclose(right.major_deg_per_mm, left.major_deg_per_mm)
-        assert np.allclose(right.minor_deg_per_mm, left.minor_deg_per_mm)
-        assert np.allclose(np.cos(2 * right.orientation_rad),
-                           np.cos(2 * left.orientation_rad))
-        assert np.allclose(np.sin(2 * right.orientation_rad),
-                           -np.sin(2 * left.orientation_rad))
-        assert np.all((right.orientation_rad > -np.pi)
-                      & (right.orientation_rad <= np.pi))
-
-    def test_requires_inclination(self, model):
-        with pytest.raises(ValueError, match='inclination_deg'):
-            model.at_eccentricity(np.array([15.0]))
-
-    def test_recovers_the_analytic_magnifications(self, model,
-                                                   synthetic_atlas):
-        ecc = 15.0
-        local = model.at_eccentricity(np.array([ecc]),
-                                      inclination_deg=np.array([0.0]))
-        fitted = np.sort([local.major_deg_per_mm[0], local.minor_deg_per_mm[0]])
-        analytic = np.sort(np.asarray(
-            synthetic_atlas.analytic_magnification_deg_per_mm(ecc),
-            dtype=float))
-        # Looser than the per-voxel Jacobian check: the table adds
-        # spatial binning on top of the per-voxel fit's own noise.
-        assert np.allclose(fitted, analytic, rtol=0.35)
-
-    def test_central_bins_are_isotropic_by_construction(self, model):
-        """Inside `atlas.isotropic_construction_radius_deg`, Erwin et
-        al. assigned eccentricity from an isotropic formula -- any
-        anisotropy the fit reports there is an artefact of that
-        construction, so orientation must read as the flagged zero, not
-        as a measurement."""
-        local = model.at_eccentricity(np.array([0.3]),
-                                      inclination_deg=np.array([5.0]))
-        assert local.isotropic_by_construction[0]
-        assert local.orientation_rad[0] == 0.0
-
-    def test_anisotropic_beyond_the_central_radius(self, model):
-        """A sanity check that the table is not isotropic everywhere --
-        otherwise `test_central_bins_are_isotropic_by_construction` would
-        pass vacuously."""
-        local = model.at_eccentricity(np.array([15.0]),
-                                      inclination_deg=np.array([0.0]))
-        assert not local.isotropic_by_construction[0]
-        assert local.anisotropy[0] > 1.05
-
-    def test_at_voxels_matches_at_eccentricity(self, model, synthetic_atlas):
-        idx = np.argwhere(synthetic_atlas.valid)
-        sample = idx[np.linspace(0, len(idx) - 1, 20, dtype=int)]
-        sel = tuple(sample.T)
-        from_voxels = model.at_voxels(sample, erwin_atlas=synthetic_atlas)
-        from_ecc = model.at_eccentricity(
-            synthetic_atlas.eccentricity_deg[sel],
-            inclination_deg=synthetic_atlas.inclination_deg[sel])
-        assert np.allclose(from_voxels.major_deg_per_mm,
-                           from_ecc.major_deg_per_mm, equal_nan=True)
-
-    def test_unreliable_bin_does_not_leak_into_its_neighbours(self):
-        """The whole point of a fine grid: an isolated bad bin (standing
-        in for the real atlas's inclination seam) must not drag a
-        neighbouring query's value toward it, even though bilinear
-        interpolation would ordinarily blend across the shared edge."""
-        ecc_edges = np.array([0., 10., 20., 30.])
-        incl_edges = np.array([-20., -10., 0., 10., 20.])
-        major_grid = np.full((3, 4), 10.0)
-        minor_grid = np.full((3, 4), 5.0)
-        minor_grid[1, 1] = 0.5  # the "torn" bin: ecc in [10,20), incl in [-10,0)
-        orientation_grid = np.zeros((3, 4))
-        n_grid = np.full((3, 4), 100.0)
-        reliable_grid = np.ones((3, 4), dtype=bool)
-        reliable_grid[1, 1] = False
-        isotropic_grid = np.ones((3, 4), dtype=bool)
-
-        model = mg.AnisotropicGradientMagnification(
-            ecc_edges, incl_edges, major_grid, minor_grid, orientation_grid,
-            n_grid, reliable_grid, isotropic_grid,
-            orientation_reliable_min_anisotropy=1.0)
-
-        # Deep inside the bad bin: routed to the nearest reliable bin
-        # instead of returning the corrupted 0.5, and flagged.
-        at_bad = model.at_eccentricity(np.array([15.0]),
-                                       inclination_deg=np.array([-5.0]))
-        assert at_bad.minor_deg_per_mm[0] == pytest.approx(5.0)
-        assert at_bad.unreliable_beyond_neighborhood[0]
-
-        # Straddling the bad bin's edge: bilinear would ordinarily blend
-        # 0.5 into the result, but the corrupted corner must be dropped
-        # and the remaining weight renormalised over the clean one(s).
-        at_edge = model.at_eccentricity(np.array([15.0]),
-                                        inclination_deg=np.array([0.0]))
-        assert at_edge.minor_deg_per_mm[0] == pytest.approx(5.0, rel=1e-6)
-        assert at_edge.unreliable_beyond_neighborhood[0]
-
-        # Far from the bad bin: clean bilinear, not flagged.
-        far = model.at_eccentricity(np.array([5.0]),
-                                    inclination_deg=np.array([15.0]))
-        assert far.minor_deg_per_mm[0] == pytest.approx(5.0)
-        assert not far.unreliable_beyond_neighborhood[0]
-
-
 @requires_real_atlas
 class TestRealAtlasCellDistribution:
     """Properties of the real atlas that the density route depends on.
 
-    These are characterisation tests of fixed input data, not of code.
+    These are characterization tests of fixed input data, not of code.
     They exist because the model makes an assumption about the atlas
     (uniform packing density) that the atlas does not satisfy, and
     because the one existing whole-nucleus check cannot see that.
@@ -453,7 +130,7 @@ class TestRealAtlasCellDistribution:
                                             cell_class, min_spread):
         """`from_atlas` defaults to ONE rho_v for the whole nucleus.
         Cells per voxel actually spans 1.5x (parvo) to 2.6x (magno) from
-        centre to periphery, so that default is wrong by up to 2x where
+        center to periphery, so that default is wrong by up to 2x where
         it is worst. Pinned so the assumption cannot be reintroduced as
         a simplification.
         """
@@ -520,3 +197,16 @@ class TestRealAtlasCellDistribution:
             f"documented shortfall is ~0.74. If this now passes, the "
             f"atlas or the loader changed.")
         assert ratios.max() > 1.10
+
+
+def test_eccentricity_table_averages_orientation_as_an_axis(
+        lgn_params, monkeypatch):
+    """Axes at +-89 deg are both nearly vertical; their median is 0."""
+    orientation = np.deg2rad([89.0, -89.0, 89.0, -89.0])
+    monkeypatch.setattr(mg.JacobianMagnification, '_table_voxels',
+                        lambda model, cell_class: (
+        np.arange(4), np.ones(4), np.ones(4), orientation))
+    atlas = SimpleNamespace(eccentricity_deg=np.array([1.0, 1.2, 3.0, 3.2]))
+    model = mg.JacobianMagnification(None, lgn_params, atlas)
+    local = model.at_eccentricity(np.array([1.0, 2.0, 3.0]))
+    assert np.allclose(np.abs(local.orientation_rad), np.pi / 2)

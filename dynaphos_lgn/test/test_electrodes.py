@@ -52,7 +52,7 @@ class TestCandidateNeighborhood:
         assert array.voxels_per_candidate == array.candidate_stride_vox ** 3
 
     def test_offsets_are_shared_across_electrodes(self, array):
-        """The neighbourhood shape depends only on the radius, so it can
+        """The neighborhood shape depends only on the radius, so it can
         be computed once instead of per electrode."""
         assert array.candidate_offsets_mm.shape == (array.n_candidates, 3)
         assert array.candidate_voxels.shape == (array.n_electrodes,
@@ -193,3 +193,18 @@ def test_requires_some_magnification_source(synthetic_atlas, lgn_params):
     with pytest.raises(ValueError):
         LGNElectrodeArray(synthetic_atlas, lgn_params,
                           np.array([[20, 20, 30]]))
+
+
+def test_placeholder_flag_marks_only_placeholder_voxels(
+        synthetic_atlas, synthetic_jacobian, array_params):
+    """Leaving the nucleus is not touching a placeholder; a labeled
+    voxel without retinotopy is."""
+    atlas = copy.deepcopy(synthetic_atlas)
+    usable = np.argwhere(atlas.valid & (atlas.eccentricity_deg > 2)
+                         & (atlas.eccentricity_deg < 6))
+    voxels = usable[[0, -1]]
+    atlas.eccentricity[tuple(voxels[0])] = atlas.missing_ecc_incl
+    atlas.update_valid()
+    arr = LGNElectrodeArray(atlas, array_params, voxels,
+                            jacobian_atlas=synthetic_jacobian)
+    assert arr.flags.touches_placeholder.tolist() == [True, False]

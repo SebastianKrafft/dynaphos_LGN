@@ -1,0 +1,410 @@
+# ======================================================================
+# LGN phosphene simulator parameters
+# ======================================================================
+# Adapted from config/params.yaml (V1 / cortex). Every number the
+# dynaphos_lgn model uses lives here.
+#
+# Currents are in AMPERES, as in the parent Dynaphos config;
+# `run.current_unit_to_ua` converts to microamperes at the simulator
+# boundary.
+# ======================================================================
+
+run:
+  resolution: [256, 256]      # [width, height] in pixels
+  view_angle: 16              # horizontal field of view, degrees
+  origin: [0, 0]
+  min_angle: 0.001            # minimal eccentricity, degrees
+  fps: 35
+  gpu: 0
+  print_stats: False
+  seed: 42
+  dtype: float32
+  batch_size: 0               # 0 when not used for batched optimization
+  current_unit_to_ua: 1.0e+6  # amperes -> microamperes
+
+display:
+  screen_resolution: [1920, 1080]
+  screen_diagonal: 13.3       # inches
+  dist_to_screen: 600         # mm
+
+# ----------------------------------------------------------------------
+# Atlas: Erwin, Baker, Busen & Malpeli (1999), one left macaque LGN
+# ----------------------------------------------------------------------
+atlas:
+  directory: data/Erwin_Atlas
+  jacobian_cache: JACOBIAN.npz
+
+  shape_ml_dv_ap: [240, 280, 320]
+  voxel_size_mm: 0.025
+  file_order: F
+
+  # Which nuclei to simulate. The left LGN covers the right hemifield;
+  # 'right' is the left atlas mirrored across the midline. Widen
+  # run.view_angle when simulating both.
+  hemispheres: [left]           # [left] | [right] | [left, right]
+  mirror:
+    ml_axis: 0                  # index of ML in shape_ml_dv_ap
+
+  # `scale` divides the stored integer to give the physical value.
+  # `bytes_per_voxel` is checked against the file size by build.py.
+  files:
+    eccentricity:
+      name: ECC.DAT
+      dtype: int16
+      bytes_per_voxel: 2
+      scale: 10.0
+    inclination:
+      name: INCL.DAT
+      dtype: int16
+      bytes_per_voxel: 2
+      scale: 1.0
+    layer:
+      name: LAYERS.DAT
+      dtype: int8
+      bytes_per_voxel: 1
+      scale: 1.0
+    cells:
+      name: CELLS.DAT
+      dtype: int16
+      bytes_per_voxel: 2
+      scale: 1000.0
+
+  # FOVEOLA.DAT: the projection column of the center of the fovea, one
+  # 0-based (ML, DV, AP) voxel index per row. Optional: without it `foveola_column`
+  # is None.
+  foveola_file: FOVEOLA.DAT
+
+  # "Not applicable" markers
+  sentinels:
+    eccentricity_inclination: 999
+    layer: 0
+    cells: 0
+
+  # Horsley-Clarke position of voxel (0, 0, 0); indices increase
+  # lateral / dorsal / anterior.
+  horsley_clarke_origin_mm:
+    ml: 8.5
+    dv: -1.5
+    ap: 3.5
+
+  layers:
+    # LAYERS.DAT codes. "contra"/"ipsi" is the eye of origin, not the
+    # hemifield.
+    names:
+      1: magno_contra
+      2: magno_ipsi
+      3: parvo_ipsi
+      4: parvo_contra
+    classes:
+      magno: [1, 2]
+      parvo: [3, 4]
+    eyes:
+      contra: [1, 4]
+      ipsi: [2, 3]
+
+  # Placeholder inclination for voxels representing the ipsilateral
+  # hemifield.
+  ipsi_flat_inclination_deg: 135.0
+  exclude_ipsi_flat_inclination: True
+
+  # Within this radius eccentricity was assigned from Malpeli et al.'s
+  # (1996) rotationally symmetric volume magnification, not
+  # interpolated from recordings. Local anisotropy there is
+  # unconstrained by data, so it is treated as isotropic.
+  isotropic_construction_radius_deg: 1.0
+
+  # Eccentricity inside that radius. 'rebuilt': the atlas notes' recipe
+  # redone (fovea.py): voxels ranked between the foveola's column and the
+  # 1 deg surface, eccentricity from the area-weighted volume
+  # magnification (Malpeli Eq. 2). Needs foveola_file. 'published':
+  # ECC.DAT as is, whose zone volumes appear to omit the area factor E.
+  central_eccentricity: rebuilt     # rebuilt | published
+
+  # The column crosses only the parvo layers. Every other layer's
+  # foveal reference is its voxels within this distance of its closest
+  # approach to the column.
+  foveal_reference_tolerance_vox: 1
+
+  # Projection columns (projection.py): the voxels within this much of
+  # a visual-field point, deg; the larger of the two. ECC.DAT is stored
+  # in 0.1 deg steps and INCL.DAT in 1 deg steps, i.e. 0.017 E deg
+  # tangentially, so a tighter tolerance finds nothing between steps.
+  projection_column:
+    tolerance_deg: 0.05
+    relative_tolerance: 0.03
+
+  max_eccentricity_deg:
+    parvo: 90.5
+    magno: 96.6
+
+  jacobian:
+    neighborhood_radius_vox: 1
+    min_neighbors: 10
+    ridge: 1.0e-8
+    transition_probe_distance_vox: 20   # 500 um
+    transition_residual_threshold_deg: 1.0
+    svd_chunk_size: 2000000
+
+# ----------------------------------------------------------------------
+# Synthetic stand-in atlas, for tests and demos without the real data
+# ----------------------------------------------------------------------
+synthetic_atlas:
+  shape_ml_dv_ap: [96, 64, 200]
+  max_eccentricity_deg: 40.0
+  eccentricity_scale_deg: 2.0    # E0 in E(s) = E0 * (exp(s/lambda) - 1)
+  n_layers: 4
+  inclination_span_deg: 120.0
+  margin_vox: 4
+  seed: 0
+  density_half_eccentricity_deg: 5.0   # density = 1 / (1 + E/this)
+  density_jitter_sd: 0.05
+
+# ----------------------------------------------------------------------
+# Electrode array
+# ----------------------------------------------------------------------
+electrodes:
+  n_electrodes: 64              # per nucleus
+  n_electrodes_by_hemisphere:   # null: use n_electrodes
+    left: null
+    right: null
+  cell_class: null              # null (all tissue) | magno | parvo
+                                # | a list, e.g. [magno, parvo]
+  min_eccentricity_deg: 0.0
+  max_eccentricity_deg: 20.0
+  bin_size_deg: 0.5
+  depth_selection: random       # central | random
+  # Largest current the array is precomputed for.
+  max_current_ua: 100.0
+  max_candidate_voxels: 40000   # budget; a voxel stride is chosen to fit
+  n_scatter_points: 512
+  position_fallback_radius_vox: 4   # neighborhood averaged when an
+                                    # electrode lands on a placeholder
+
+# ----------------------------------------------------------------------
+# Sampling from images / video
+# ----------------------------------------------------------------------
+sampling:
+  sampling_method: receptive_fields   # receptive_fields | center
+  rf_cell_class: tip                  # tip | parvo | magno; tip takes the
+                                      # class of the layer at each electrode
+  rf_fallback_class: parvo            # tip, when no magno/parvo voxel is
+                                      # in the electrode's neighborhood
+  rf_form: exponential                # exponential | power
+  rf_size_scale: 1.0                  # multiplier on rc(E)
+  stimulus_scale: 1.0e-4
+
+# ----------------------------------------------------------------------
+# Current spread and recruitment
+# ----------------------------------------------------------------------
+current_spread:
+  k_ua_per_mm2: 675.0           # macaque V1 (Tehovnik et al. 2006)
+
+  # Stoney/Tehovnik spread, D = 2 sqrt(I/K), with a Gaussian
+  # recruitment kernel.
+  contour_value: 0.1353352832366127   # 1/e^2, kernel weight at the
+                                      # spread radius
+  tail_weight: 0.01             # where the candidate gather is truncated
+
+  class_scaling: none           # none | diameter | diameter_squared
+  class_scaling_reference: parvo
+  # Diameter of the retinal axons ending in each layer class, just before
+  # they enter the LGN (Conley & Fitzpatrick 1989, light microscopy, macaque).
+  # The electrode is assumed to activate axons, so K scales with their size.
+  axon_diameter_um:
+    parvo: 2.0
+    magno: 2.8
+
+recruitment:
+  distance_histogram_bins: 192
+
+# ----------------------------------------------------------------------
+# Multi-electrode aggregation
+# ----------------------------------------------------------------------
+# No LGN multi-electrode data exists.
+#
+#   field_superposition  Signed drives (R_j / d)^2, i.e. I_j / (K d^2), a
+#                        point source's current density in units of the
+#                        recruitment threshold K, are summed before the
+#                        recruitment kernel is applied, from each
+#                        electrode's distance histogram and its
+#                        neighbors' shell-averaged field. One electrode
+#                        alone recovers the single-electrode kernel
+#                        exactly. Each electrode counts all tissue
+#                        recruited in its own neighborhood, so
+#                        neighbors only ever raise its equivalent
+#                        current, up to electrodes.max_current_ua.
+#                        Shared tissue is not split: a weak electrode
+#                        next to a strong one takes on most of its
+#                        charge.
+#   independent          Each electrode recruits as if alone.
+aggregation:
+  mode: field_superposition     # field_superposition | independent
+  # Summation needs the pulses to overlap in time. When they are
+  # interleaved, the mode falls back to independent.
+  simultaneous_pulses: true
+  # How a merged recruited volume becomes a percept (field_superposition
+  # only):
+  #   merged  electrodes whose summed field recruits one connected
+  #           volume of tissue render as ONE phosphene, drawn from that
+  #           volume's own voxels and given the brightest member's
+  #           brightness x detection probability
+  #   grown   each electrode keeps its own blob, grown by its
+  #           equivalent current
+  phosphene_merging: merged
+  # Lattice the summed field is evaluated on for merging, mm.
+  merge_lattice_mm: 0.05
+
+# ----------------------------------------------------------------------
+# Magnification
+# ----------------------------------------------------------------------
+# Phosphene size comes from the per-voxel Jacobian of the atlas's
+# retinotopy (atlas.jacobian).
+magnification:
+  # Malpeli, Lee & Baker (1996), Eqs 3-4: cell density, cells/deg^2.
+  malpeli:
+    parvo:                      # a * (E + e0) ** exponent
+      a: 1011688.0
+      e0: 2.9144
+      exponent: -2.6798
+    magno:                      # a * ((E - e0)^2 + c) ** exponent
+      a: 2620.2
+      e0: 1.8322
+      c: 5.5638
+      exponent: -0.8012
+    # Eq. 2: laminar volume per deg^2 of hemifield, mm^3/deg^2,
+    # a * (E + e0) ** exponent
+    volume:
+      a: 17.93
+      e0: 2.6612
+      exponent: -2.2908
+
+  # Bin width of the inclination-averaged magnification table, used
+  # for electrodes whose voxel has no Jacobian.
+  eccentricity_table_bin_width_deg: 1.0
+
+# ----------------------------------------------------------------------
+# Receptive fields
+# ----------------------------------------------------------------------
+receptive_fields:
+  cell_classes: [magno, parvo]
+
+  # Fits to digitized Croner & Kaplan (1995) Fig. 4.
+  croner_kaplan:
+    exponential:                # rc = a * exp(b * E)
+      magno: {a_deg: 0.096236, b_per_deg: 0.032755, r2_log: 0.619, n: 18,
+              ecc_range_deg: [3.56, 32.15]}
+      parvo: {a_deg: 0.032349, b_per_deg: 0.049124, r2_log: 0.631, n: 80,
+              ecc_range_deg: [0.66, 35.16]}
+    power:                      # rc = a * E^b
+      magno: {a_deg: 0.046784, b: 0.473278, r2_log: 0.727}
+      parvo: {a_deg: 0.024392, b: 0.399947, r2_log: 0.511}
+    surround_center_radius_ratio:   # rs/rc
+      parvo: 6.7
+      magno: 4.8
+
+  # Integrated surround/center ratio (Ks*rs^2)/(Kc*rc^2), not the peak
+  # ratio Ks/Kc.
+  surround_center_volume_ratio:
+    magno: 0.55
+    parvo: 0.55
+
+# ----------------------------------------------------------------------
+# Rendering
+# ----------------------------------------------------------------------
+rendering:
+  adaptive_scatter_bandwidth: True
+  scatter_bandwidth_floor_pixels: 0.5
+  scatter_bandwidth_ceiling_fraction: 0.2   # of the patch radius
+  scatter_patch_radius_percentile: 99.5
+  scatter_patch_radius_margin: 1.25
+  scatter_extent_percentile: 95
+  smooth_clamp_softness_fraction: 0.05
+  # Blur kernel half-width, in sigmas of the live bandwidth. The kernel
+  # is tapered to zero at that radius, and each scatter patch is padded
+  # by it at the bandwidth ceiling, so no splat ends in a hard edge.
+  scatter_kernel_truncation_sigmas: 3.5
+
+# ----------------------------------------------------------------------
+# Temporal dynamics, brightness and threshold calibration
+# ----------------------------------------------------------------------
+# Dynaphos's V1 model, refitted on the same human V1 data (Fernandez et
+# al. 2021, Fig. 2 and 6A; Schmidt et al. 1996) with the strength-
+# duration leak rheobase * (1 + chronaxie / pulse_width) switched on, at
+# default_stim.chronaxie_s = 200 us. The rheobase is fitted jointly with
+# the activation threshold on all detection proportions; see
+# experiments/reproduction/chronaxie_refit.py and
+# out/chronaxie_refit.csv. Fit quality equals the V1 calibration's
+# (psychometric R^2 0.867 vs 0.868, brightness 0.951 vs 0.950, Schmidt
+# 0.920 vs 0.930), and the 50% detection current for 170 us, 300 Hz,
+# 166 ms is 46.8 uA (V1: 46.2 uA). These values belong to that
+# chronaxie: change chronaxie_s and they must be refitted. The V1
+# values are in config/params.yaml.
+temporal_dynamics:
+  trace_increase_rate: 18.584246033698      # V1: 13.95528162
+  activation_decay_per_second: 0.00012340980408667956   # not refitted
+  trace_decay_per_second: 0.999685051681    # V1: 0.99949191
+
+brightness_saturation:
+  cps_half: 1.0385396986469249e-07         # V1: 1.057631326853325e-07
+  slope_brightness: 19405408.445675622      # V1: 19152642.500946816
+
+# ----------------------------------------------------------------------
+# Thresholding
+# ----------------------------------------------------------------------
+thresholding:
+  use_threshold: True
+  # Refitted for chronaxie 200 us (see temporal_dynamics above). V1:
+  # rheobase 23.9e-6, threshold 9.141886000943878e-08 +- 6.715877869833961e-08.
+  rheobase: 11.085088335226e-6
+  activation_threshold: 9.295872971571543e-08
+  activation_threshold_sd: 6.743956811454771e-08
+  # Logistic detection curve instead of a hard step, so electrodes
+  # below threshold still get a gradient. Thresholds already vary
+  # between electrodes with activation_threshold_sd, so the logistic is
+  # kept narrow: at 10 / sd the simulated psychometric curve keeps the
+  # calibrated spread (1 / sd widens it by ~40%, see
+  # experiments/reproduction/).
+  soft_threshold: True
+  soft_threshold_slope: null    # null -> 10 / activation_threshold_sd
+  # What the logistic returns at zero activation:
+  #   none             plain logistic (p(0) is about 1e-6 for a typical
+  #                    threshold, 0.5 for thresholds clipped to 0)
+  #   zero_activation  p(a) = (S(a) - S(0)) / (1 - S(0)), so p(0) = 0
+  soft_threshold_baseline: zero_activation
+
+default_stim:
+  relative_stim_duration: 1
+  pw_default: 170.e-6           # seconds
+  freq_default: 300             # Hertz
+  # Largest amplitude optimized stimulation may use. At most
+  # electrodes.max_current_ua.
+  safety_limit_ua: 100.0
+  # Strength-duration chronaxie: the current threshold is
+  # rheobase * (1 + chronaxie / pulse_width). The thresholding,
+  # brightness and trace values above were refitted for this value; for
+  # another chronaxie refit them with
+  # experiments/reproduction/chronaxie_refit.py. 0 with the V1 values
+  # of config/params.yaml gives the V1 model.
+  chronaxie_s: 200.e-6
+
+# ----------------------------------------------------------------------
+# Benchmarks: measured values
+# ----------------------------------------------------------------------
+benchmarks:
+  pezaris_2007:                 # Pezaris & Reid (2007), macaque LGN
+    threshold_ua: [40.0, 12.0]          # mean, sd
+
+# ----------------------------------------------------------------------
+# Validation: Erwin et al. (1999)'s published totals, checked by build.py
+# ----------------------------------------------------------------------
+validation:
+  erwin_1999:
+    magno_cells: 104841
+    parvo_cells: 1048571
+    volume_mm3: 57.1
+    mean_density_per_voxel: 0.312
+    max_density_per_voxel: 1.018
+    reconstruction_accuracy_um: [211, 217]
+  report_eccentricity_edges: [0, 1, 5, 10, 20, 30, 90]
+  jacobian_report_sample_size: 400000
+  jacobian_report_seed: 0
