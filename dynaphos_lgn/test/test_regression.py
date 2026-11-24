@@ -1,4 +1,4 @@
-"""Bit-identical outputs against a stored reference.
+"""Outputs against a stored reference, to float32 rounding.
 
 The reference holds the outputs of a small, seeded, CPU-only run on the
 synthetic atlas, under independent aggregation and under field
@@ -109,7 +109,8 @@ def test_outputs_match_reference():
     outputs = all_outputs()
     assert sorted(outputs) == sorted(reference.files)
     mismatched = [key for key in reference.files
-                  if not np.array_equal(outputs[key], reference[key])]
+                  if not np.allclose(outputs[key], reference[key],
+                                     rtol=1e-5, atol=1e-6)]
     assert not mismatched, f"Outputs differ from the reference: {mismatched}"
 
 

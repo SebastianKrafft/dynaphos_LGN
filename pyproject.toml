@@ -13,7 +13,7 @@ authors = [
 ]
 description = "Differentiable phosphene simulation for LGN stimulation, built on Dynaphos."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = ["numpy", "torch", "scipy", "pyyaml", "opencv-python",
                 "matplotlib"]
 classifiers = [

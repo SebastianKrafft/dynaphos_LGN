@@ -405,7 +405,8 @@ class LGNElectrodeArray:
         """Subsample candidates for scatter rendering, by distance rank
         with a stride so the outer shell is not over-represented."""
         n_points = min(n_scatter_points, self.n_candidates)
-        order = np.argsort(self.candidate_distance_mm)
+        # Stable: grid distances tie, and numpy versions break ties apart.
+        order = np.argsort(self.candidate_distance_mm, kind='stable')
         step = max(1, self.n_candidates // n_points)
         chosen = order[::step][:n_points]
         self.scatter_index = np.sort(chosen)

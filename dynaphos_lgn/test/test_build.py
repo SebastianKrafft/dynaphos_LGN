@@ -85,14 +85,15 @@ class TestFoveola:
     synthetic atlas: the checks need only a grid and its eccentricity."""
 
     @staticmethod
-    def write(path, rows, bom=True):
+    def write(atlas, directory, rows, bom=True):
         text = '\r\n'.join('\t'.join(str(v) for v in row) for row in rows)
+        path = directory / atlas.params['atlas']['foveola_file']
         path.write_text(('﻿' if bom else '') + text, encoding='utf-8')
 
     def test_reads_the_supplied_format(self, synthetic_atlas, tmp_path):
         """Tab-separated, CRLF, with a UTF-8 byte-order mark."""
         rows = synthetic_atlas.foveola_column[:3]
-        self.write(tmp_path / 'foveola.dat', rows)
+        self.write(synthetic_atlas, tmp_path, rows)
         assert np.array_equal(
             synthetic_atlas.load_foveola_column(tmp_path), rows)
 
@@ -104,13 +105,13 @@ class TestFoveola:
     def test_refuses_a_voxel_off_the_fovea(self, synthetic_atlas, tmp_path):
         off = np.argwhere(synthetic_atlas.valid
                           & (synthetic_atlas.eccentricity > 0))[:1]
-        self.write(tmp_path / 'foveola.dat', off)
+        self.write(synthetic_atlas, tmp_path, off)
         with pytest.raises(ValueError, match='zero eccentricity'):
             synthetic_atlas.load_foveola_column(tmp_path)
 
     def test_refuses_a_voxel_outside_the_grid(self, synthetic_atlas,
                                               tmp_path):
-        self.write(tmp_path / 'foveola.dat',
+        self.write(synthetic_atlas, tmp_path,
                    [synthetic_atlas.atlas_shape])
         with pytest.raises(ValueError, match='inside the grid'):
             synthetic_atlas.load_foveola_column(tmp_path)
